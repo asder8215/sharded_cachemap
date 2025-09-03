@@ -1,2 +1,2 @@
-# LRU-Cache
-An implementation of a Generic LRU Cache in Rust
+# ShardedCacheMap
+An asynchronously concurrent sharded cache map in Rust. More details to be provided.
