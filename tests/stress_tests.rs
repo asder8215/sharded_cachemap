@@ -24,7 +24,7 @@ async fn multitask_multiple_puts_and_gets_1() {
             let scm_clone = scm.clone();
             async move {
                 for i in 0..1000 {
-                    let key = format!("hi{}", i);
+                    let key = format!("hi{i}");
                     scm_clone.put(key.clone(), i).await;
                     let _ = scm_clone.get(&key).await;
                 }
@@ -35,7 +35,7 @@ async fn multitask_multiple_puts_and_gets_1() {
     }
 
     for handler in cache_vecs {
-        let _ = handler.await.unwrap();
+        handler.await.unwrap();
     }
     // scm.print_cache();
 }
@@ -61,15 +61,15 @@ async fn multitask_multiple_puts_and_gets_2() {
             let mut misses: f64 = 0.0;
             async move {
                 for i in 0..1000 {
-                    let key = format!("hi{}", i);
+                    let key = format!("hi{i}");
                     if i % 3 == 0 {
                         let res = scm_clone.put(key.clone(), i).await;
-                        if res == None {
+                        if res.is_none() {
                             misses += 1.0;
                         }
                     }
                     let res = scm_clone.get(&key).await;
-                    if res == None {
+                    if res.is_none() {
                         misses += 1.0;
                     }
                 }
@@ -115,13 +115,13 @@ async fn multitask_random_puts_and_gets_2() {
                 for i in 0..1000 {
                     let rand_key = rng().random_range(0..250000);
                     if i % 3 == 0 {
-                        let res = scm_clone.put(rand_key.clone(), i).await;
-                        if res == None {
+                        let res = scm_clone.put(rand_key, i).await;
+                        if res.is_none() {
                             misses += 1.0;
                         }
                     }
                     let res = scm_clone.get(&rand_key).await;
-                    if res == None {
+                    if res.is_none() {
                         misses += 1.0;
                     }
                 }
