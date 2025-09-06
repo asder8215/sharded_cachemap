@@ -1,5 +1,5 @@
-use rand::rng;
 use rand::Rng;
+use rand::rng;
 use sharded_cachemap::EvictionPolicy;
 use sharded_cachemap::ShardedCacheMap;
 use std::sync::Arc;
@@ -9,7 +9,11 @@ async fn multitask_multiple_puts_and_gets_1() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
     const NUM_TASKS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::new(SHARDS, Some(SLOTS), EvictionPolicy::FIFO));
+    let scm = Arc::new(ShardedCacheMap::new(
+        SHARDS,
+        Some(SLOTS),
+        EvictionPolicy::FIFO,
+    ));
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -41,7 +45,11 @@ async fn multitask_multiple_puts_and_gets_2() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
     const NUM_TASKS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::new(SHARDS, Some(SLOTS), EvictionPolicy::FIFO));
+    let scm = Arc::new(ShardedCacheMap::new(
+        SHARDS,
+        Some(SLOTS),
+        EvictionPolicy::FIFO,
+    ));
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -50,7 +58,7 @@ async fn multitask_multiple_puts_and_gets_2() {
     for _ in 0..NUM_TASKS {
         let cache_handler = tokio::spawn({
             let scm_clone = scm.clone();
-            let mut misses:f64 = 0.0;
+            let mut misses: f64 = 0.0;
             async move {
                 for i in 0..1000 {
                     let key = format!("hi{}", i);
@@ -77,7 +85,10 @@ async fn multitask_multiple_puts_and_gets_2() {
         total_misses += handler.await.unwrap();
         // assert_eq!(Some(0), res);
     }
-    println!("Miss Rate: {}", total_misses/(1000.0 * NUM_TASKS as f64 * 2.0));
+    println!(
+        "Miss Rate: {}",
+        total_misses / (1000.0 * NUM_TASKS as f64 * 2.0)
+    );
     // scm.print_cache();
 }
 
@@ -86,7 +97,11 @@ async fn multitask_random_puts_and_gets_2() {
     const SHARDS: usize = 10;
     const SLOTS: usize = 10;
     const NUM_TASKS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::new(SHARDS, Some(SLOTS), EvictionPolicy::FIFO));
+    let scm = Arc::new(ShardedCacheMap::new(
+        SHARDS,
+        Some(SLOTS),
+        EvictionPolicy::FIFO,
+    ));
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -95,7 +110,7 @@ async fn multitask_random_puts_and_gets_2() {
     for _ in 0..NUM_TASKS {
         let cache_handler = tokio::spawn({
             let scm_clone = scm.clone();
-            let mut misses:f64 = 0.0;
+            let mut misses: f64 = 0.0;
             async move {
                 for i in 0..1000 {
                     let rand_key = rng().random_range(0..250000);
@@ -122,6 +137,9 @@ async fn multitask_random_puts_and_gets_2() {
         total_misses += handler.await.unwrap();
         // assert_eq!(Some(0), res);
     }
-    println!("Miss Rate: {}", total_misses/(1000.0 * NUM_TASKS as f64 * 2.0));
+    println!(
+        "Miss Rate: {}",
+        total_misses / (1000.0 * NUM_TASKS as f64 * 2.0)
+    );
     // scm.print_cache();
 }

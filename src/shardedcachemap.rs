@@ -18,10 +18,9 @@ const PUTTER_BIT: usize = 1 << 63;
 // bits 62-0 are used for getter count
 const GETTER_MASK: usize = !PUTTER_BIT;
 
-
 // This here below is just strategy notes on how this custom rwlock will work with atomics and notifs:
 //
-// What does getter have to check to increment state? state & WRITER_BIT == 0 (incoming get may not be added 
+// What does getter have to check to increment state? state & WRITER_BIT == 0 (incoming get may not be added
 // while put bit is set)
 //
 // What does putter have to check to set put bit in state? state & WRITER_BIT == 0 (only one putter allowed)
@@ -30,10 +29,10 @@ const GETTER_MASK: usize = !PUTTER_BIT;
 // Putter must wait (place itself in a priority put notif) until getters are done. Getters must notify
 // priority putter that it's done when state == WRITER_BIT. Putter on wake up will check firstly if there
 // are for sure no getters working by checking if state & READER_MASK == 0, does its work and then notify
-// all getters through notify_waiter(), then another time with notify_one() (since there's possibly a very, 
+// all getters through notify_waiter(), then another time with notify_one() (since there's possibly a very,
 // very small window for a getter to not register itself to the notify list when it sees a putter bit is set
 // so we add a permit just in case), and then wake up one putter (since only one putter can really perform
-// work at a time) 
+// work at a time)
 //
 // Assume state is 0 (no getters or putters have set anything)
 // If getter views this state ->
@@ -128,10 +127,9 @@ impl<K, V> HashShard<K, V> {
 }
 
 impl<K, V> ShardedCacheMap<K, V> {
-
     // Instatiates the ShardedCacheMap object with non-zero user requested number of shards
     // and slots (default 8 slots if none is provided) and an eviction policy to follow (FIFO,
-    // LIFO) 
+    // LIFO)
     pub fn new(shards: usize, slots: Option<usize>, evict_policy: EvictionPolicy) -> Self {
         assert!(
             shards > 0,
@@ -219,7 +217,6 @@ where
         self.slot_num
     }
 
-
     fn get_work<Q>(&self, key: &Q, hash_shard: &HashShard<K, V>) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -256,7 +253,6 @@ where
         loop {
             // if the writer bit has not been set yet
             if state & PUTTER_BIT == 0 {
-
                 // initially I thought getters should fetch_add BUT
                 // compare exchange must occur for getters because
                 // getters must observe the put bit being set here
@@ -289,7 +285,7 @@ where
                         }
                     }
                 }
-                
+
                 // I thought about doing this initially, but this would allow
                 // for more getters
                 // hash_shard.state.fetch_add(1, Ordering::SeqCst);

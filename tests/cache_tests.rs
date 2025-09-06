@@ -6,7 +6,11 @@ use std::sync::Arc;
 async fn basic_put() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::new(SHARDS, Some(SLOTS), EvictionPolicy::FIFO));
+    let scm = Arc::new(ShardedCacheMap::new(
+        SHARDS,
+        Some(SLOTS),
+        EvictionPolicy::FIFO,
+    ));
 
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
