@@ -1,3 +1,4 @@
+use crate::PutResult;
 use std::fmt::Debug;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -12,6 +13,11 @@ use std::{
 };
 use tokio::sync::Notify;
 // use crate::put_guard::PutGuard;
+
+// TODO: Need to do the following
+//  - add comments/docs to all of the functions
+//  - clean up any code (remove any redundant code if any)
+//  - add more unit tests and benchmarking examples
 
 // bit 63 checked for whether putter bit is set
 const PUTTER_BIT: usize = 1 << 63;
@@ -127,9 +133,9 @@ impl<K, V> HashShard<K, V> {
 }
 
 impl<K, V> ShardedCacheMap<K, V> {
-    // Instatiates the ShardedCacheMap object with non-zero user requested number of shards
-    // and slots (default 8 slots if none is provided) and an eviction policy to follow (FIFO,
-    // LIFO)
+    /// Instatiates the ShardedCacheMap object with non-zero user requested number of shards
+    /// and slots (default 8 slots if none is provided) and an eviction policy to follow (FIFO,
+    /// LIFO)
     pub fn new(shards: usize, slots: Option<usize>, evict_policy: EvictionPolicy) -> Self {
         assert!(
             shards > 0,
@@ -150,8 +156,8 @@ impl<K, V> ShardedCacheMap<K, V> {
                 vec.into_boxed_slice()
             },
             shard_num: shards,
-            slot_num,
-            evict_policy,
+            slot_num: slot_num,
+            evict_policy: evict_policy,
         }
     }
 
@@ -176,10 +182,12 @@ impl<K, V> ShardedCacheMap<K, V> {
                     } else {
                         write!(print_buffer, "({key_ref:?}, {val_ref:?},) ").unwrap();
                     }
-                } else if j == self.slot_num - 1 {
-                    write!(print_buffer, "<uninit>").unwrap();
                 } else {
-                    write!(print_buffer, "<uninit>, ").unwrap();
+                    if j == self.slot_num - 1 {
+                        write!(print_buffer, "<uninit>").unwrap();
+                    } else {
+                        write!(print_buffer, "<uninit>, ").unwrap();
+                    }
                 }
             }
             write!(print_buffer, "]").unwrap();
@@ -235,7 +243,7 @@ where
                 return Some(v);
             }
         }
-        None
+        return None;
     }
 
     pub async fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -285,7 +293,7 @@ where
                 }
 
                 // I thought about doing this initially, but this would allow
-                // for more getters
+                // for more getters to come in when a putter bit is set
                 // hash_shard.state.fetch_add(1, Ordering::SeqCst);
                 // let val = self.get_work(key, hash_shard);
                 // let end_state = hash_shard.state.fetch_sub(1,Ordering::Release);
@@ -308,16 +316,14 @@ where
         num_slots: usize,
         evict_policy: EvictionPolicy,
         hash_shard_ind: usize,
-    ) -> Option<(K, V)>
+        // ) -> Option<(K, V)>
+    ) -> PutResult<K, V>
     where
         K: Debug,
     {
         let hash_shard = &self.shards[hash_shard_ind];
         let num_items = hash_shard.enq_counter.load(Ordering::Relaxed);
-        // println!("item num is {num_items}");
         for i in 0..num_items {
-            // println!("Here with key {:?}", key);
-
             // SAFETY: because num_items tells us how many key-val were initialized
             // it's guaranteed that there is a key here
             let slot_key = unsafe { &*hash_shard.pair_list[i].key.get() };
@@ -335,13 +341,14 @@ where
                 // we can safely override the value inside this MaybeUninit
                 unsafe { (*hash_shard.pair_list[i].val.get()).write(val) };
 
-                return Some((key, old_val));
+                return PutResult::Update {
+                    key: key,
+                    val: old_val,
+                };
             }
         }
 
         if num_items != num_slots {
-            // println!("Got here?");
-
             // SAFETY: MaybeUninit hasn't been initialized here, so it's completely
             // okay to write to this spot (no worry about data that hasn't been dropped)
             unsafe { (*hash_shard.pair_list[num_items].key.get()).write(key) };
@@ -369,12 +376,15 @@ where
             };
             unsafe { (*hash_shard.pair_list[evict_ind].key.get()).write(key) };
             unsafe { (*hash_shard.pair_list[evict_ind].val.get()).write(val) };
-            return Some(slot);
+            return PutResult::Eviction {
+                key: slot.0,
+                val: slot.1,
+            };
         }
-        None
+        return PutResult::Insert;
     }
 
-    pub async fn put(&self, key: K, val: V) -> Option<(K, V)>
+    pub async fn put(&self, key: K, val: V) -> PutResult<K, V>
     where
         K: Debug,
     {
@@ -485,6 +495,8 @@ unsafe impl<K, V> Send for Slot<K, V> {}
 impl<K, V> Drop for HashShard<K, V> {
     fn drop(&mut self) {
         let items = self.enq_counter.load(Ordering::Relaxed);
+        // SAFETY: the enq_counter informs us for sure if there
+        // is an item here at this slot which we can safely drop
         for i in 0..items {
             let key = self.pair_list[i].key.get();
             let val = self.pair_list[i].val.get();

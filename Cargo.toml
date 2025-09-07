@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+ahash = "0.8.12"
 tokio = {version = "^1.45.1", features = ["sync"] }
 
 [dev-dependencies]
@@ -18,3 +19,7 @@ panic = "abort"
 [profile.release]
 panic = "abort"
 debug = true
+
+[[bench]]
+name = "cache_bench"
+harness = false
