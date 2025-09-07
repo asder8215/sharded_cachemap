@@ -130,8 +130,8 @@ impl<K, V, S> DHShardedCacheMap<K, V, S> {
                 vec.into_boxed_slice()
             },
             shard_num: shards,
-            slot_num: slot_num,
-            evict_policy: evict_policy,
+            slot_num,
+            evict_policy,
         }
     }
 
@@ -156,12 +156,10 @@ impl<K, V, S> DHShardedCacheMap<K, V, S> {
                     } else {
                         write!(print_buffer, "({key_ref:?}, {val_ref:?},) ").unwrap();
                     }
+                } else if j == self.slot_num - 1 {
+                    write!(print_buffer, "<uninit>").unwrap();
                 } else {
-                    if j == self.slot_num - 1 {
-                        write!(print_buffer, "<uninit>").unwrap();
-                    } else {
-                        write!(print_buffer, "<uninit>, ").unwrap();
-                    }
+                    write!(print_buffer, "<uninit>, ").unwrap();
                 }
             }
             write!(print_buffer, "]").unwrap();
@@ -232,7 +230,7 @@ where
         if k.borrow() == key {
             return Some(v);
         }
-        return None;
+        None
     }
 
     pub async fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -289,7 +287,7 @@ where
             hash_shard.pair_list[slot_ind]
                 .occupied
                 .store(1, Ordering::Release);
-            return PutResult::Insert;
+            PutResult::Insert
         } else {
             let slot_key = unsafe { &*hash_shard.pair_list[slot_ind].key.get() };
             let stored_key = unsafe { &*slot_key.as_ptr() };
@@ -299,10 +297,10 @@ where
                 let old_val =
                     unsafe { (*hash_shard.pair_list[slot_ind].val.get()).assume_init_read() };
                 unsafe { (*hash_shard.pair_list[slot_ind].val.get()).write(val) };
-                return PutResult::Update {
-                    key: key,
+                PutResult::Update {
+                    key,
                     val: old_val,
-                };
+                }
             } else {
                 // SAFETY: On eviction, it must be the case that the key-val pair must be overrided with whatever
                 // key-val pair was provided by the user. The previous key-val pair stored will be returned and owned
@@ -315,10 +313,10 @@ where
                 };
                 unsafe { (*hash_shard.pair_list[slot_ind].key.get()).write(key) };
                 unsafe { (*hash_shard.pair_list[slot_ind].val.get()).write(val) };
-                return PutResult::Eviction {
+                PutResult::Eviction {
                     key: slot.0,
                     val: slot.1,
-                };
+                }
             }
         }
     }

@@ -27,7 +27,7 @@ async fn bench_cache(
             let mut misses: f64 = 0.0;
             let data = data.clone();
             async move {
-                for _ in 0..iter_per_task as usize {
+                for _ in 0..iter_per_task {
                     let rand_key = rng().random_range(0..iter_per_task) as usize;
 
                     let get_or_put = rng().random_bool(0.50);
@@ -91,7 +91,7 @@ async fn bench_dh_cache(
             let mut misses: f64 = 0.0;
             let data = data.clone();
             async move {
-                for _ in 0..iter_per_task as usize {
+                for _ in 0..iter_per_task {
                     let rand_key = rng().random_range(0..iter_per_task) as usize;
 
                     let get_or_put = rng().random_bool(0.50);

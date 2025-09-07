@@ -65,7 +65,7 @@ async fn multitask_multiple_puts_and_gets_2() {
             async move {
                 for i in 0..NUM_OPS as usize {
                     let rand_key = rng().random_range(0..250000);
-                    let res = scm_clone.put(rand_key.clone(), i).await;
+                    let res = scm_clone.put(rand_key, i).await;
                     match res {
                         PutResult::Update { key: _, val: _ } => {}
                         _ => {
@@ -177,7 +177,7 @@ async fn multitask_multiple_puts_and_gets_dh() {
             async move {
                 for i in 0..NUM_OPS as usize {
                     let rand_key = rng().random_range(0..250000);
-                    let res = scm_clone.put(rand_key.clone(), i).await;
+                    let res = scm_clone.put(rand_key, i).await;
                     match res {
                         PutResult::Update { key: _, val: _ } => {}
                         _ => {

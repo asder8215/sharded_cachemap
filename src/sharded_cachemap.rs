@@ -156,8 +156,8 @@ impl<K, V> ShardedCacheMap<K, V> {
                 vec.into_boxed_slice()
             },
             shard_num: shards,
-            slot_num: slot_num,
-            evict_policy: evict_policy,
+            slot_num,
+            evict_policy,
         }
     }
 
@@ -182,12 +182,10 @@ impl<K, V> ShardedCacheMap<K, V> {
                     } else {
                         write!(print_buffer, "({key_ref:?}, {val_ref:?},) ").unwrap();
                     }
+                } else if j == self.slot_num - 1 {
+                    write!(print_buffer, "<uninit>").unwrap();
                 } else {
-                    if j == self.slot_num - 1 {
-                        write!(print_buffer, "<uninit>").unwrap();
-                    } else {
-                        write!(print_buffer, "<uninit>, ").unwrap();
-                    }
+                    write!(print_buffer, "<uninit>, ").unwrap();
                 }
             }
             write!(print_buffer, "]").unwrap();
@@ -243,7 +241,7 @@ where
                 return Some(v);
             }
         }
-        return None;
+        None
     }
 
     pub async fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -342,7 +340,7 @@ where
                 unsafe { (*hash_shard.pair_list[i].val.get()).write(val) };
 
                 return PutResult::Update {
-                    key: key,
+                    key,
                     val: old_val,
                 };
             }
@@ -381,7 +379,7 @@ where
                 val: slot.1,
             };
         }
-        return PutResult::Insert;
+        PutResult::Insert
     }
 
     pub async fn put(&self, key: K, val: V) -> PutResult<K, V>
