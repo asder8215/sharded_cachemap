@@ -28,18 +28,6 @@ pub struct DoubleHashPolicy<S = RandomState> {
     second_hash: S,
 }
 
-// pub enum PutResult<K, V> {
-//     Eviction {
-//         key: K,
-//         val: V,
-//     },
-//     Update {
-//         key: K,
-//         val: V,
-//     },
-//     Insert
-// }
-
 /// An asynchronous cache data structure that operates with
 /// m hash shards and n slots (within a bounded queue) per hash shard
 #[derive(Debug)]
@@ -59,6 +47,7 @@ pub struct DHShardedCacheMap<K, V, S = RandomState> {
 struct HashShard<K, V> {
     /// bound queue of key-val pairs of size m
     pair_list: Box<[Slot<K, V>]>,
+    // pair_list: Box<[CachePadded<Slot<K, V>>]>,
 }
 
 #[derive(Debug)]
@@ -95,6 +84,7 @@ impl<K, V> HashShard<K, V> {
                 let mut vec = Vec::with_capacity(slots);
                 for _ in 0..slots {
                     vec.push(Slot::new())
+                    // vec.push(CachePadded::new(Slot::new()))
                 }
                 vec.into_boxed_slice()
             },

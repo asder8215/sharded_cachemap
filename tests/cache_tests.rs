@@ -43,7 +43,7 @@ async fn basic_put() {
 async fn basic_get() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::<&'static str, usize>::new(
+    let scm = Arc::new(ShardedCacheMap::<&str, usize>::new(
         SHARDS,
         Some(SLOTS),
         EvictionPolicy::FIFO,
@@ -54,7 +54,7 @@ async fn basic_get() {
     // this put result should give me the previous
     let get_handler = tokio::spawn(
         // let scm_clone = scm.clone();
-        async move { scm.get("hi").await.cloned() },
+        async move { scm.get(&"hi").await.cloned() },
     );
 
     let res = get_handler.await.unwrap();
@@ -80,7 +80,7 @@ async fn basic_put_and_get() {
         // let scm_clone = scm.clone();
         async move {
             scm.put("hi", 0).await;
-            scm.get("hi").await.cloned()
+            scm.get(&"hi").await.cloned()
         },
     );
 

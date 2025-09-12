@@ -3,7 +3,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Notify;
 
 /// This is a guard for the put request to drop
-/// the writer bit on cancellation
+/// the writer bit on cancellation 
+/// NOTE: This doesn't work unfortunately :(
+/// because you can't hold a guard safely across
+/// await points
 pub(crate) struct PutGuard<'a> {
     state: &'a AtomicUsize,
     put_notify: &'a Notify,
