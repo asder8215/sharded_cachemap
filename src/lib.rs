@@ -3,6 +3,7 @@ mod dhsharded_cachemap;
 mod put_guard;
 mod sharded_cachemap;
 mod sieve_sharded_cachemap;
+mod key_ref;
 
 pub use common::PutResult;
 pub use dhsharded_cachemap::DHShardedCacheMap;

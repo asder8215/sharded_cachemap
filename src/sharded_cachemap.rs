@@ -1,14 +1,13 @@
 use crate::PutResult;
+use crate::key_ref::KeyRef;
 use std::fmt::Debug;
 use std::fmt::Write;
 use std::hash::Hash;
-use std::ops::Deref;
-use std::ops::DerefMut;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{
-    borrow::Borrow,
     cell::UnsafeCell,
     hash::{DefaultHasher, Hasher},
     mem::MaybeUninit,
@@ -18,12 +17,12 @@ use ahash::HashMap;
 use ahash::HashMapExt;
 use crossbeam_utils::CachePadded;
 use tokio::sync::Notify;
-// use crate::put_guard::PutGuard;
 
 // TODO: Need to do the following
 //  - add comments/docs to all of the functions
 //  - clean up any code (remove any redundant code if any)
 //  - add more unit tests and benchmarking examples
+//  - maybe add clone and remove method to ShardedCacheMap 
 
 // bit 63 checked for whether putter bit is set
 const PUTTER_BIT: usize = 1 << 63;
@@ -70,7 +69,6 @@ pub enum EvictionPolicy {
 pub struct ShardedCacheMap<K, V> {
     /// bounded array of size n
     shards: Box<[CachePadded<HashShard<K, V>>]>,
-    // shards: Box<[HashShard<K, V>]>,
     /// num of shards
     shard_num: usize,
     /// num of slots in each shard
@@ -80,21 +78,17 @@ pub struct ShardedCacheMap<K, V> {
     evict_policy: EvictionPolicy,
 }
 
-
-// FIFO Queue: 4000 elements, 1 Hashmap -> 1000 Hashmaps each connected to small FIFO queues
-
-// 1 global Hashmap, 1 global FIFO Queue -> 1000 Hashmap each with their own small FIFO queue and we make eviction
-// at the level of this specific hashmap with that h
-
-// HashMap 1 - 1000, 128 threads, 64 threads are looking Hashmap 3 to perform get(), 2 other threads
-// wants to perform a put operation to Hashmap 3 to per
-
 #[derive(Debug)]
 struct HashShard<K, V> 
 {
     /// bound queue of key-val pairs of size m
     pair_list: Pin<Box<[Slot<K, V>]>>,
-    key_ind_map: HashMap<*const K, usize>,
+    /// a hashmap containing all the key-val pairs in this
+    /// shard (for quick access)
+    /// An UnsafeCell is used here to provide interior mutability
+    /// on the HashMap without needing to make put method for [ShardedCacheMap]
+    /// be mutable (since we use HashMap's insert method)
+    key_ind_map: UnsafeCell<HashMap<KeyRef<K>, usize>>,
     /// puts are registered to this notify list
     put_notify: Notify,
     /// notif for the first put to set the bit 63 in state
@@ -119,10 +113,8 @@ struct Slot<K, V> {
     val: UnsafeCell<MaybeUninit<V>>,
 }
 
-#[derive(Debug)]
-struct KeyRef<K>(*const K);
-
 impl<K, V> Slot<K, V> {
+    /// Creates an empty and uninitialized Slot
     fn new() -> Self {
         Self {
             key: UnsafeCell::new(MaybeUninit::uninit()),
@@ -132,6 +124,8 @@ impl<K, V> Slot<K, V> {
 }
 
 impl<K, V> HashShard<K, V> {
+    /// Instantiates the Hash Shard with empty pair list, notify,
+    /// and eviction policy
     fn new(slots: usize, evict_policy: EvictionPolicy) -> Self {
         Self {
             pair_list: {
@@ -141,11 +135,10 @@ impl<K, V> HashShard<K, V> {
                 }
                 vec.into_boxed_slice().into()
             },
-            key_ind_map: HashMap::with_capacity(slots),
+            key_ind_map: UnsafeCell::new(HashMap::with_capacity(slots)),
             put_notify: Notify::new(),
             priority_put_notify: Notify::new(),
             get_notify: Notify::new(),
-            // state: CachePadded::new(AtomicUsize::new(0)),
             state: AtomicUsize::new(0),
             evict_index: match evict_policy {
                 EvictionPolicy::FIFO => AtomicUsize::new(0),
@@ -154,66 +147,45 @@ impl<K, V> HashShard<K, V> {
             enq_counter: AtomicUsize::new(0),
         }
     }
+
+    /// Borrow method helper to get a reference to the HashShard's
+    /// HashMap (in order to keep ShardedCacheMap put method immutable
+    /// instead of mutable)
+    fn borrow_key_ind_map(&self) -> &HashMap<KeyRef<K>, usize> {
+        unsafe { &*self.key_ind_map.get() }
+    }
 }
 
-// impl <K, V> Deref for ShardedCacheMap<K, V> {
-//     type Target = Self;
-    
-//     fn deref(&self) -> &Self::Target {
-//         &self
-//     }
-// } 
-
-// impl <K, V> DerefMut for ShardedCacheMap<K, V> {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         self
-//     }
-// }
-
-// impl <K, V> Deref for HashShard<K, V> {
-//     type Target = Self;
-    
-//     fn deref(&self) -> &Self::Target {
-//         &self
-//     }
-// } 
-
-// impl <K, V> DerefMut for HashShard<K, V> {
-//     fn deref_mut(&mut self) -> &mut Self::Target {
-//         self
-//     }
-// }
 
 impl<K, V> ShardedCacheMap<K, V> {
-    /// Instatiates the ShardedCacheMap object with non-zero user requested number of shards
-    /// and slots (default 8 slots if none is provided) and an eviction policy to follow (FIFO,
-    /// LIFO)
-    pub fn new(shards: usize, slots: Option<usize>, evict_policy: EvictionPolicy) -> Self {
-        assert!(
-            shards > 0,
-            "The number of requested shards must be positive"
-        );
-        let slot_num = if let Some(slots) = slots {
-            assert!(slots > 0, "The number of requested slots must be positive");
-            slots
-        } else {
-            8
-        };
-        Self {
+    /// Instatiates the [ShardedCacheMap] object with non-zero user requested number of shards,
+    /// 8 slots, and an eviction policy to follow (FIFO, LIFO)
+    pub fn new(shards: usize, evict_policy: EvictionPolicy) -> Arc<Self> {
+        Self::new_with_slots(shards, 8, evict_policy)
+    }
+
+    /// Instatiates the [ShardedCacheMap] object with non-zero user requested number of shards
+    /// and slots, and an eviction policy to follow (FIFO, LIFO)
+    pub fn new_with_slots(shards: usize, slots: usize, evict_policy: EvictionPolicy) -> Arc<Self> {
+        Arc::new(Self {
             shards: {
                 let mut vec = Vec::with_capacity(shards);
                 for _ in 0..shards {
-                    vec.push(CachePadded::new(HashShard::new(slot_num, evict_policy)));
-                    // vec.push(HashShard::new(slot_num, evict_policy));
+                    vec.push(CachePadded::new(HashShard::new(slots, evict_policy)));
                 }
                 vec.into_boxed_slice()
             },
             shard_num: shards,
-            slot_num,
+            slot_num: slots,
             evict_policy,
-        }
+        })
     }
 
+    /// Prints the content of [ShardedCacheMap]
+    /// 
+    /// Time Complexity: O(shards * slots)
+    /// 
+    /// Space Complexity: O(1)
     pub fn print_cache(&self)
     where
         K: Debug,
@@ -252,9 +224,11 @@ impl<K, V> ShardedCacheMap<K, V> {
 
 impl<K, V> ShardedCacheMap<K, V>
 where
-    K: Hash + Eq + PartialEq,
+    K: Hash + Eq + PartialEq + Debug,
 {
-    #[inline]
+    /// Uses the DefaultHasher SipHasher13 to hash the key to choose
+    /// a shard that the key object will fall into
+    #[inline(always)]
     fn hash_key<T>(&self, key: &T) -> u64
     where
         T: Hash + ?Sized,
@@ -264,71 +238,54 @@ where
         hasher.finish()
     }
 
+    /// Returns the number of shards that [ShardedCacheMap] has
     #[inline(always)]
     pub fn get_num_of_shards(&self) -> usize {
         self.shard_num
     }
 
+    /// Returns the number of slots in each shard of [ShardedCacheMap]
     #[inline(always)]
     pub fn get_num_of_slots(&self) -> usize {
         self.slot_num
     }
 
-    // fn get_work<Q>(&self, key: &Q, hash_shard: &HashShard<K, V>) -> Option<&V>
-    // where
-    //     *const K: Borrow<Q>,
-    //     Q: ?Sized + Eq + Hash,
-    // {
-    fn get_work(&self, key: *const K, hash_shard: &HashShard<K, V>) -> Option<&V>
-    {
-        // for i in 0..hash_shard.enq_counter.load(Ordering::Relaxed) {
-        //     // SAFETY: enq_counter in hash_shard is guaranteed to tell us how many
-        //     // initialized items are in this shard
-        //     // Moreover, we give references to the key-val pair in the slot
-        //     // because the user should not own the key-val pair on get()
-        //     let (k, v) = unsafe {
-        //         (
-        //             (*hash_shard.pair_list[i].key.get()).assume_init_ref(),
-        //             (*hash_shard.pair_list[i].val.get()).assume_init_ref(),
-        //         )
-        //     };
-        //     if k.borrow() == key {
-        //         return Some(v);
-        //     }
-        // }
-
-        if let Some(index) = hash_shard.key_ind_map.get(&key) {
+    /// Helper function to get the value within the [HashShard]
+    #[inline]
+    fn get_work(&self, key: &K, hash_shard: &HashShard<K, V>) -> Option<&V> {
+        if let Some(index) = hash_shard.borrow_key_ind_map().get(&KeyRef::from(key)) {
             // SAFETY: enq_counter in hash_shard is guaranteed to tell us how many
             // initialized items are in this shard
             // Moreover, we give references to the key-val pair in the slot
             // because the user should not own the key-val pair on get()
             let (k, v) = unsafe {
                 (
-                    // (*hash_shard.pair_list[*index].key.get()).assume_init_ref(),
-                    // (*hash_shard.pair_list[*index].val.get()).assume_init_ref(),
-                    (*hash_shard.pair_list[*index].key.get()).as_ptr(),
+                    (*hash_shard.pair_list[*index].key.get()).assume_init_ref(),
                     (*hash_shard.pair_list[*index].val.get()).assume_init_ref(),
                 )
             };
-            if unsafe { *k == *key } {
+
+            if *k == *key {
                 return Some(v);
             }    
         }
-
         None
     }
 
-    // pub async fn get<Q>(&self, key: &Q) -> Option<&V>
-    // where
-    //     *const K: Borrow<Q>,
-    //     Q: ?Sized + Hash + Eq,
-    pub async fn get(&self, key: &K) -> Option<&V>
-    {
+    /// Retrieves the associated value of the key from the cache if it exists.
+    /// If the key does not exist in the cache, then this method will return
+    /// None.
+    /// 
+    /// Time Complexity: O(1) (Amortized because it depends on how long the custom
+    /// asynchronous RWlock is held by a previous put operation + consideration of 
+    /// HashMap chain bucket; this should be really fast though!)
+    /// 
+    /// Space Complexity: O(1) 
+    pub async fn get(&self, key: &K) -> Option<&V> {
         let hash_shard_ind = (self.hash_key(key) % self.get_num_of_shards() as u64) as usize;
         let hash_shard = &self.shards[hash_shard_ind];
 
         let mut state = hash_shard.state.load(Ordering::Acquire);
-
         loop {
             // if the writer bit has not been set yet
             if state & PUTTER_BIT == 0 {
@@ -364,17 +321,6 @@ where
                         }
                     }
                 }
-
-                // I thought about doing this initially, but this would allow
-                // for more getters to come in when a putter bit is set
-                // hash_shard.state.fetch_add(1, Ordering::SeqCst);
-                // let val = self.get_work(key, hash_shard);
-                // let end_state = hash_shard.state.fetch_sub(1,Ordering::Release);
-
-                // if end_state == WRITER_BIT {
-                //     hash_shard.priority_put_notify.notify_one();
-                // }
-                // return val;
             } else {
                 hash_shard.get_notify.notified().await;
                 state = hash_shard.state.load(Ordering::Acquire);
@@ -382,22 +328,18 @@ where
         }
     }
 
+    /// Helper function to insert, update, and/or evict the key from the [ShardedCacheMap]
     fn put_work(
-        // &self,
+        &self,
         key: K,
         val: V,
         num_slots: usize,
         evict_policy: EvictionPolicy,
-        // hash_shard_ind: usize,
-        hash_shard: &mut HashShard<K, V>
-        // ) -> Option<(K, V)>
+        hash_shard: &HashShard<K, V>
     ) -> PutResult<K, V>
     where
-        K: Debug,
     {
-        // let hash_shard = &mut self.shards[hash_shard_ind];
-
-        if let Some(index) = hash_shard.key_ind_map.get(&(&key as *const K)) {
+        if let Some(index) = hash_shard.borrow_key_ind_map().get(&key) {
             // SAFETY: num_items safely tells us how many key-val pairs were initialized
             // and because the value will be replaced here, the user can
             // receive an owned version of V (the dropping of V will occur on
@@ -416,12 +358,13 @@ where
             let num_items = hash_shard.enq_counter.load(Ordering::Relaxed);
             if num_items != num_slots {
                 let key_index = hash_shard.enq_counter.fetch_add(1, Ordering::Relaxed);
-                hash_shard.key_ind_map.insert(&key, key_index);
                 // SAFETY: MaybeUninit hasn't been initialized here, so it's completely
                 // okay to write to this spot (no worry about data that hasn't been dropped)
-                unsafe { (*hash_shard.pair_list[num_items].key.get()).write(key) };
+                let key = unsafe { (*hash_shard.pair_list[num_items].key.get()).write(key) };
                 unsafe { (*hash_shard.pair_list[num_items].val.get()).write(val) };
 
+                // SAFETY: key_ind_map is locked with state
+                unsafe { &mut *hash_shard.key_ind_map.get() }.insert(KeyRef(key), key_index);
             } else {
                 let evict_ind: usize;
                 match evict_policy {
@@ -442,8 +385,21 @@ where
                         (*hash_shard.pair_list[evict_ind].val.get()).assume_init_read(),
                     )
                 };
-                unsafe { (*hash_shard.pair_list[evict_ind].key.get()).write(key) };
+
+                // SAFETY: Hashmap is locked under state atomic field, so we can
+                // remove this item safely
+                unsafe { &mut *hash_shard.key_ind_map.get() }.remove(&slot.0);
+
+                // SAFETY: We have an owned copy of the key val pairs to give to the user, 
+                // so we can overwrite this safely with the new key val pairs
+                let key = unsafe { (*hash_shard.pair_list[evict_ind].key.get()).write(key) };
                 unsafe { (*hash_shard.pair_list[evict_ind].val.get()).write(val) };
+
+                // SAFETY: key_ind_map is locked with state
+                // NOTE: We don't want to use &key here, we get the reference from the key that
+                // MaybeUninit provides from .write() (two lines above) because the function
+                // provided key will get drop while the one inside MaybeUninit lasts
+                unsafe { &mut *hash_shard.key_ind_map.get() }.insert(KeyRef(key), evict_ind);
                 return PutResult::Eviction {
                     key: slot.0,
                     val: slot.1,
@@ -451,77 +407,27 @@ where
             }
         }
         PutResult::Insert
-        // for i in 0..num_items {
-        //     // SAFETY: because num_items tells us how many key-val were initialized
-        //     // it's guaranteed that there is a key here
-        //     let slot_key = unsafe { &*hash_shard.pair_list[i].key.get() };
-        //     let stored_key = unsafe { &*slot_key.as_ptr() };
-
-        //     // compare to see if the provided user key is equal to stored key
-        //     if key == *stored_key {
-        //         // SAFETY: num_items safely tells us how many key-val pairs were initialized
-        //         // and because the value will be replaced here, the user can
-        //         // receive an owned version of V (the dropping of V will occur on
-        //         // user's end), so it's okay to get a duplicate copy here
-        //         let old_val = unsafe { (*hash_shard.pair_list[i].val.get()).assume_init_read() };
-
-        //         // SAFETY: since V is copied in old_val and dropping it is user's responsibility
-        //         // we can safely override the value inside this MaybeUninit
-        //         unsafe { (*hash_shard.pair_list[i].val.get()).write(val) };
-
-        //         return PutResult::Update {
-        //             key,
-        //             val: old_val,
-        //         };
-        //     }
-        // }
-
-        // if num_items != num_slots {
-        //     // SAFETY: MaybeUninit hasn't been initialized here, so it's completely
-        //     // okay to write to this spot (no worry about data that hasn't been dropped)
-        //     unsafe { (*hash_shard.pair_list[num_items].key.get()).write(key) };
-        //     unsafe { (*hash_shard.pair_list[num_items].val.get()).write(val) };
-        //     hash_shard.enq_counter.fetch_add(1, Ordering::Relaxed);
-        // } else {
-        //     let evict_ind: usize;
-        //     match evict_policy {
-        //         EvictionPolicy::LIFO => {
-        //             evict_ind = hash_shard.evict_index.fetch_sub(1, Ordering::Relaxed) % num_slots;
-        //         }
-        //         EvictionPolicy::FIFO => {
-        //             evict_ind = hash_shard.evict_index.fetch_add(1, Ordering::Relaxed) % num_slots;
-        //         }
-        //     }
-
-        //     // SAFETY: On eviction, it must be the case that the key-val pair must be overrided with whatever
-        //     // key-val pair was provided by the user. The previous key-val pair stored will be returned and owned
-        //     // by the user (user is responsible for dropping this owned data as a result)
-        //     let slot = unsafe {
-        //         (
-        //             (*hash_shard.pair_list[evict_ind].key.get()).assume_init_read(),
-        //             (*hash_shard.pair_list[evict_ind].val.get()).assume_init_read(),
-        //         )
-        //     };
-        //     unsafe { (*hash_shard.pair_list[evict_ind].key.get()).write(key) };
-        //     unsafe { (*hash_shard.pair_list[evict_ind].val.get()).write(val) };
-        //     return PutResult::Eviction {
-        //         key: slot.0,
-        //         val: slot.1,
-        //     };
-        // }
-        // PutResult::Insert
     }
 
-    pub async fn put(&mut self, key: K, val: V) -> PutResult<K, V>
-    // pub async fn put(&self, key: K, val: V) -> PutResult<K, V>
+    /// Inserts the associated key value pair into the [ShardedCacheMap]. If the key
+    /// already exists in the cache, then it will update the value of the key in cache
+    /// and return the old (K, V) pair (Putresult::Update). If the cache is full, then it will
+    /// evict the (K, V) pair in the shard following either FIFO/LIFO and return the
+    /// evicted (K, V) pair (Putresult::Eviction). Otherwise, it will perform a regular
+    /// insertion in the shard (Putresult::Insert).
+    /// 
+    /// Time Complexity: O(1) (Amortized because it depends on how long the custom
+    /// asynchronous RWlock is held by get operation(s) + consideration of 
+    /// HashMap chain bucket; this should be really fast though!)
+    /// 
+    /// Space Complexity: O(1) 
+    pub async fn put(&self, key: K, val: V) -> PutResult<K, V>
     where
-        K: Debug,
     {
         let hash_shard_ind = (self.hash_key(&key) % self.get_num_of_shards() as u64) as usize;
         let num_of_slots = self.get_num_of_slots();
         let evict_policy = self.evict_policy;
-        let hash_shard = &mut self.shards[hash_shard_ind];
-        // let hash_shard = &self.shards[hash_shard_ind];
+        let hash_shard = &self.shards[hash_shard_ind];
 
         let mut state = hash_shard.state.load(Ordering::Acquire);
 
@@ -537,82 +443,12 @@ where
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        // this put guard does not work to
-                        // set the put bit to 0 for async :(
-                        // let _ = PutGuard::create_guard(
-                        //     &hash_shard.state,
-                        //     &hash_shard.put_notify,
-                        //     &hash_shard.get_notify,
-                        // );
                         let mut sleep_time = 1;
                         loop {
                             // are there no getters working right now?
                             // if so we can proceed with doing our work
                             if new_state & GETTER_MASK == 0 {
-                                // let kv = self.put_work(
-                                //     key,
-                                //     val,
-                                //     num_of_slots,
-                                //     evict_policy,
-                                //     // hash_shard_ind,
-                                //     hash_shard
-                                // );
-
-                                let kv: PutResult<K, V>;
-                                if let Some(index) = hash_shard.key_ind_map.get(&(&key as *const K)) {
-                                    // SAFETY: num_items safely tells us how many key-val pairs were initialized
-                                    // and because the value will be replaced here, the user can
-                                    // receive an owned version of V (the dropping of V will occur on
-                                    // user's end), so it's okay to get a duplicate copy here
-                                    let old_val = unsafe { (*hash_shard.pair_list[*index].val.get()).assume_init_read() };
-                                    
-                                    // SAFETY: since V is copied in old_val and dropping it is user's responsibility
-                                    // we can safely override the value inside this MaybeUninit
-                                    unsafe { (*hash_shard.pair_list[*index].val.get()).write(val) };
-
-                                    kv = PutResult::Update {
-                                        key: key,
-                                        val: old_val,
-                                    };
-                                } else {
-                                    let num_items = hash_shard.enq_counter.load(Ordering::Relaxed);
-                                    if num_items != num_of_slots {
-                                        let key_index = hash_shard.enq_counter.fetch_add(1, Ordering::Relaxed);
-                                        hash_shard.key_ind_map.insert(&key, key_index);
-                                        // SAFETY: MaybeUninit hasn't been initialized here, so it's completely
-                                        // okay to write to this spot (no worry about data that hasn't been dropped)
-                                        unsafe { (*hash_shard.pair_list[num_items].key.get()).write(key) };
-                                        unsafe { (*hash_shard.pair_list[num_items].val.get()).write(val) };
-                                        kv = PutResult::Insert;
-                                    } else {
-                                        let evict_ind: usize;
-                                        match evict_policy {
-                                            EvictionPolicy::LIFO => {
-                                                evict_ind = hash_shard.evict_index.fetch_sub(1, Ordering::Relaxed) % num_of_slots;
-                                            }
-                                            EvictionPolicy::FIFO => {
-                                                evict_ind = hash_shard.evict_index.fetch_add(1, Ordering::Relaxed) % num_of_slots;
-                                            }
-                                        }
-
-                                        // SAFETY: On eviction, it must be the case that the key-val pair must be overrided with whatever
-                                        // key-val pair was provided by the user. The previous key-val pair stored will be returned and owned
-                                        // by the user (user is responsible for dropping this owned data as a result)
-                                        let slot = unsafe {
-                                            (
-                                                (*hash_shard.pair_list[evict_ind].key.get()).assume_init_read(),
-                                                (*hash_shard.pair_list[evict_ind].val.get()).assume_init_read(),
-                                            )
-                                        };
-                                        unsafe { (*hash_shard.pair_list[evict_ind].key.get()).write(key) };
-                                        unsafe { (*hash_shard.pair_list[evict_ind].val.get()).write(val) };
-                                        kv = PutResult::Eviction {
-                                            key: slot.0,
-                                            val: slot.1,
-                                        };
-                                    }
-                                }
-
+                                let kv = self.put_work(key, val, num_of_slots, evict_policy, &hash_shard);
 
                                 // set put bit to 0
                                 hash_shard.state.fetch_and(GETTER_MASK, Ordering::Release);
@@ -632,14 +468,6 @@ where
                             // getters are working rn, sleep and wait until
                             // they are done
                             else {
-                                // Cancel Safety issues: You can't safely use this notified.await
-                                // across the put bit being set to 1 since on cancellation
-                                // the put bit will not be set to 0 (and using a PutGuard
-                                // as I had initially intended does not work for async)
-                                // Until a good async guard or async drop is created, the
-                                // priority put will stick to working in a loop
-                                // hash_shard.priority_put_notify.notified().await;
-
                                 // thread sleeps on failure to prevent high CPU usage
                                 // max sleep time is stops at 100 ns
                                 sleep(Duration::from_nanos(sleep_time));
@@ -675,10 +503,8 @@ where
 // method, it should be sync and send safe
 unsafe impl<K, V> Sync for Slot<K, V> {}
 unsafe impl<K, V> Send for Slot<K, V> {}
-
 unsafe impl<K, V> Sync for HashShard<K, V> {}
 unsafe impl<K, V> Send for HashShard<K, V> {}
-
 unsafe impl<K, V> Sync for ShardedCacheMap<K, V> {}
 unsafe impl<K, V> Send for ShardedCacheMap<K, V> {}
 

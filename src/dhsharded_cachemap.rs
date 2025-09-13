@@ -18,13 +18,17 @@ use tokio::sync::Notify;
 //  - clean up any code (remove any redundant code if any)
 //  - add more unit tests and benchmarking examples
 //  - add code for users to provide a hasher function to use
+//  - maybe add clone and remove method to DHShardedCacheMap 
 
 /// DHShardedCacheMap uses Double Hashing, one for choosing a shard,
 /// one for choosing a slot in the shard's bounded queue
 /// It performs one shot gets, inserts, and evictions at this slot
 #[derive(Debug)]
 pub struct DoubleHashPolicy<S = RandomState> {
+    // Still working on this
+    #[allow(dead_code)]
     first_hash: S,
+    #[allow(dead_code)]
     second_hash: S,
 }
 
@@ -40,6 +44,7 @@ pub struct DHShardedCacheMap<K, V, S = RandomState> {
     slot_num: usize,
     /// determines the eviction policy to use for evicting
     /// a key out of the pair_list
+    #[allow(dead_code)]
     evict_policy: Option<DoubleHashPolicy<S>>,
 }
 
