@@ -18,27 +18,19 @@ use tokio::sync::Notify;
 //  - clean up any code (remove any redundant code if any)
 //  - add more unit tests and benchmarking examples
 //  - add code for users to provide a hasher function to use
+//  - maybe add clone and remove method to DHShardedCacheMap 
 
 /// DHShardedCacheMap uses Double Hashing, one for choosing a shard,
 /// one for choosing a slot in the shard's bounded queue
 /// It performs one shot gets, inserts, and evictions at this slot
 #[derive(Debug)]
 pub struct DoubleHashPolicy<S = RandomState> {
+    // Still working on this
+    #[allow(dead_code)]
     first_hash: S,
+    #[allow(dead_code)]
     second_hash: S,
 }
-
-// pub enum PutResult<K, V> {
-//     Eviction {
-//         key: K,
-//         val: V,
-//     },
-//     Update {
-//         key: K,
-//         val: V,
-//     },
-//     Insert
-// }
 
 /// An asynchronous cache data structure that operates with
 /// m hash shards and n slots (within a bounded queue) per hash shard
@@ -52,6 +44,7 @@ pub struct DHShardedCacheMap<K, V, S = RandomState> {
     slot_num: usize,
     /// determines the eviction policy to use for evicting
     /// a key out of the pair_list
+    #[allow(dead_code)]
     evict_policy: Option<DoubleHashPolicy<S>>,
 }
 
@@ -59,6 +52,7 @@ pub struct DHShardedCacheMap<K, V, S = RandomState> {
 struct HashShard<K, V> {
     /// bound queue of key-val pairs of size m
     pair_list: Box<[Slot<K, V>]>,
+    // pair_list: Box<[CachePadded<Slot<K, V>>]>,
 }
 
 #[derive(Debug)]
@@ -95,6 +89,7 @@ impl<K, V> HashShard<K, V> {
                 let mut vec = Vec::with_capacity(slots);
                 for _ in 0..slots {
                     vec.push(Slot::new())
+                    // vec.push(CachePadded::new(Slot::new()))
                 }
                 vec.into_boxed_slice()
             },

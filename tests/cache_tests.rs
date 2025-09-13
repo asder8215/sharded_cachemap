@@ -8,11 +8,11 @@ use std::sync::Arc;
 async fn basic_put() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::new(
+    let scm = ShardedCacheMap::new_with_slots(
         SHARDS,
-        Some(SLOTS),
+        SLOTS,
         EvictionPolicy::FIFO,
-    ));
+    );
 
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -26,7 +26,7 @@ async fn basic_put() {
     });
 
     let res = put_handler.await.unwrap();
-    scm.print_cache();
+    // scm.print_cache();
     match res {
         PutResult::Update { key, val } => {
             assert_eq!(key, "hi");
@@ -43,18 +43,18 @@ async fn basic_put() {
 async fn basic_get() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::<&'static str, usize>::new(
+    let scm = ShardedCacheMap::<&str, usize>::new_with_slots(
         SHARDS,
-        Some(SLOTS),
+        SLOTS,
         EvictionPolicy::FIFO,
-    ));
+    );
 
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
     // this put result should give me the previous
     let get_handler = tokio::spawn(
         // let scm_clone = scm.clone();
-        async move { scm.get("hi").await.cloned() },
+        async move { scm.get(&"hi").await.cloned() },
     );
 
     let res = get_handler.await.unwrap();
@@ -67,11 +67,11 @@ async fn basic_get() {
 async fn basic_put_and_get() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::<&'static str, usize>::new(
+    let scm = ShardedCacheMap::new_with_slots(
         SHARDS,
-        Some(SLOTS),
+        SLOTS,
         EvictionPolicy::FIFO,
-    ));
+    );
 
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -80,7 +80,9 @@ async fn basic_put_and_get() {
         // let scm_clone = scm.clone();
         async move {
             scm.put("hi", 0).await;
-            scm.get("hi").await.cloned()
+            let res = scm.get(&"hi").await.cloned();
+            // scm.print_cache();
+            res
         },
     );
 
@@ -95,11 +97,11 @@ async fn multitask_put_and_get() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
     const NUM_TASKS: usize = 10;
-    let scm = Arc::new(ShardedCacheMap::<&'static str, usize>::new(
+    let scm = ShardedCacheMap::new_with_slots(
         SHARDS,
-        Some(SLOTS),
+        SLOTS,
         EvictionPolicy::FIFO,
-    ));
+    );
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -110,7 +112,7 @@ async fn multitask_put_and_get() {
             let scm_clone = scm.clone();
             async move {
                 scm_clone.put("hi", 0).await;
-                scm_clone.get("hi").await.cloned()
+                scm_clone.get(&"hi").await.cloned()
             }
         });
 
@@ -121,7 +123,7 @@ async fn multitask_put_and_get() {
         let res = handler.await.unwrap();
         assert_eq!(Some(0), res);
     }
-    // scm.print_cache();
+    scm.print_cache();
 
     // assert_eq!(Some(0), res);
 }
