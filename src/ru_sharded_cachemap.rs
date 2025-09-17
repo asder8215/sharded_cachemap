@@ -1,9 +1,11 @@
 use crate::PutResult;
 use crate::key_ref::KeyRef;
+use std::cell::Cell;
 use std::fmt::Debug;
 use std::fmt::Write;
 use std::hash::Hash;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread::sleep;
 use std::time::Duration;
@@ -22,7 +24,7 @@ use tokio::sync::Notify;
 //  - add comments/docs to all of the functions
 //  - clean up any code (remove any redundant code if any)
 //  - add more unit tests and benchmarking examples
-//  - maybe add clone and remove method to ShardedCacheMap 
+//  - maybe add clone and remove method to RUShardedCacheMap 
 
 // bit 63 checked for whether putter bit is set
 const PUTTER_BIT: usize = 1 << 63;
@@ -53,20 +55,20 @@ const GETTER_MASK: usize = !PUTTER_BIT;
 // Incoming getters and putters will go into their respective getter and putter notify list (note not priority putter
 // but a separate notify list)
 
-/// Eviction for [ShardedCacheMap] is done on a Hash Shard level basis
+/// Eviction for [RUShardedCacheMap] is done on a Hash Shard level basis
 /// meaning when the hash_shard itself is full and another key wants
 /// to put itself into that specific shard, eviction will be prompted in
-/// FIFO or LIFO order of the key-val pair queue.
+/// LRU or MRU order of the key-val pair queue.
 #[derive(Debug, Clone, Copy)]
-pub enum EvictionPolicy {
-    LIFO,
-    FIFO,
+pub enum RUEvictionPolicy {
+    LRU,
+    MRU,
 }
 
 /// An asynchronous cache data structure that operates with
 /// m hash shards and n slots (within a bounded queue) per hash shard
 #[derive(Debug)]
-pub struct ShardedCacheMap<K, V> {
+pub struct RUShardedCacheMap<K, V> {
     /// bounded array of size n
     shards: Box<[CachePadded<HashShard<K, V>>]>,
     /// num of shards
@@ -75,7 +77,7 @@ pub struct ShardedCacheMap<K, V> {
     slot_num: usize,
     /// determines the eviction policy to use for evicting
     /// a key out of the pair_list
-    evict_policy: EvictionPolicy,
+    evict_policy: RUEvictionPolicy,
 }
 
 #[derive(Debug)]
@@ -86,7 +88,7 @@ struct HashShard<K, V>
     /// a hashmap containing all the key-val pairs in this
     /// shard (for quick access)
     /// An UnsafeCell is used here to provide interior mutability
-    /// on the HashMap without needing to make put method for [ShardedCacheMap]
+    /// on the HashMap without needing to make put method for [RUShardedCacheMap]
     /// be mutable (since we use HashMap's insert method)
     key_ind_map: UnsafeCell<HashMap<KeyRef<K>, usize>>,
     /// puts are registered to this notify list
@@ -98,8 +100,15 @@ struct HashShard<K, V>
     /// bit 63: put count, 62-0: get count (acts like a rwlock)
     // state: CachePadded<AtomicUsize>,
     state: AtomicUsize,
-    /// index to evict at if the queue is full
-    evict_index: AtomicUsize,
+    /// the head item of the queue (most recently used)
+    head_ind: Cell<usize>,
+    /// the tail item of the queue (least recently used)
+    tail_ind: Cell<usize>,
+    /// getters need a lock to updating the 
+    /// head of the list to ensure that
+    /// the current head index is updated
+    /// appropriately
+    update_head: AtomicBool,
     /// a counter informing about how many items have been
     /// initialized in this pair list (only put modifies)
     enq_counter: AtomicUsize,
@@ -111,6 +120,10 @@ struct Slot<K, V> {
     key: UnsafeCell<MaybeUninit<K>>,
     /// the val at this slot
     val: UnsafeCell<MaybeUninit<V>>,
+    /// the prev index of this slot
+    prev_ind: Cell<usize>,
+    /// the next index of this slot
+    next_ind: Cell<usize>,
 }
 
 impl<K, V> Slot<K, V> {
@@ -119,6 +132,8 @@ impl<K, V> Slot<K, V> {
         Self {
             key: UnsafeCell::new(MaybeUninit::uninit()),
             val: UnsafeCell::new(MaybeUninit::uninit()),
+            prev_ind: Cell::new(0),
+            next_ind: Cell::new(0),
         }
     }
 }
@@ -126,7 +141,8 @@ impl<K, V> Slot<K, V> {
 impl<K, V> HashShard<K, V> {
     /// Instantiates the Hash Shard with empty pair list, notify,
     /// and eviction policy
-    fn new(slots: usize, evict_policy: EvictionPolicy) -> Self {
+    // fn new(slots: usize, evict_policy: EvictionPolicy) -> Self {
+    fn new(slots: usize) -> Self {
         Self {
             pair_list: {
                 let mut vec = Vec::with_capacity(slots);
@@ -140,16 +156,15 @@ impl<K, V> HashShard<K, V> {
             priority_put_notify: Notify::new(),
             get_notify: Notify::new(),
             state: AtomicUsize::new(0),
-            evict_index: match evict_policy {
-                EvictionPolicy::FIFO => AtomicUsize::new(0),
-                EvictionPolicy::LIFO => AtomicUsize::new(slots - 1),
-            },
+            head_ind: Cell::new(0),
+            tail_ind: Cell::new(0),
+            update_head: AtomicBool::new(false),
             enq_counter: AtomicUsize::new(0),
         }
     }
 
     /// Borrow method helper to get a reference to the HashShard's
-    /// HashMap (in order to keep ShardedCacheMap put method immutable
+    /// HashMap (in order to keep RUShardedCacheMap put method immutable
     /// instead of mutable)
     fn borrow_key_ind_map(&self) -> &HashMap<KeyRef<K>, usize> {
         unsafe { &*self.key_ind_map.get() }
@@ -157,21 +172,21 @@ impl<K, V> HashShard<K, V> {
 }
 
 
-impl<K, V> ShardedCacheMap<K, V> {
-    /// Instatiates the [ShardedCacheMap] object with non-zero user requested number of shards,
+impl<K, V> RUShardedCacheMap<K, V> {
+    /// Instatiates the [RUShardedCacheMap] object with non-zero user requested number of shards,
     /// 8 slots, and an eviction policy to follow (FIFO, LIFO)
-    pub fn new(shards: usize, evict_policy: EvictionPolicy) -> Arc<Self> {
+    pub fn new(shards: usize, evict_policy: RUEvictionPolicy) -> Arc<Self> {
         Self::new_with_slots(shards, 8, evict_policy)
     }
 
-    /// Instatiates the [ShardedCacheMap] object with non-zero user requested number of shards
+    /// Instatiates the [RUShardedCacheMap] object with non-zero user requested number of shards
     /// and slots, and an eviction policy to follow (FIFO, LIFO)
-    pub fn new_with_slots(shards: usize, slots: usize, evict_policy: EvictionPolicy) -> Arc<Self> {
+    pub fn new_with_slots(shards: usize, slots: usize, evict_policy: RUEvictionPolicy) -> Arc<Self> {
         Arc::new(Self {
             shards: {
                 let mut vec = Vec::with_capacity(shards);
                 for _ in 0..shards {
-                    vec.push(CachePadded::new(HashShard::new(slots, evict_policy)));
+                    vec.push(CachePadded::new(HashShard::new(slots)));
                 }
                 vec.into_boxed_slice()
             },
@@ -181,7 +196,7 @@ impl<K, V> ShardedCacheMap<K, V> {
         })
     }
 
-    /// Prints the content of [ShardedCacheMap] as it appears in the
+    /// Prints the content of [RUShardedCacheMap] as it appears in the
     /// shard
     /// 
     /// Time Complexity: O(shards * slots)
@@ -221,9 +236,68 @@ impl<K, V> ShardedCacheMap<K, V> {
         writeln!(print_buffer).unwrap();
         print!("{print_buffer}");
     }
+
+    /// Prints the content of [RUShardedCacheMap] based on
+    /// recent usage in the shard (from most recently used to 
+    /// least recently used)
+    /// 
+    /// Time Complexity: O(shards * slots)
+    /// 
+    /// Space Complexity: O(1)
+    pub fn print_ru_cache(&self)
+    where
+        K: Debug,
+        V: Debug,
+    {
+        let mut print_buffer = String::new();
+        write!(print_buffer, "[").unwrap();
+        writeln!(print_buffer).unwrap();
+        for i in 0..self.shard_num {
+            let shard = &self.shards[i];
+            let head = shard.head_ind.get();
+            let mut curr = head;
+            let enq_ctr = shard.enq_counter.load(Ordering::Relaxed);
+            write!(print_buffer, "  [").unwrap();
+
+            // we got some items in this shard, now print by recent usage
+            if enq_ctr != 0 {
+                loop {
+                    let key_ref = unsafe { (*shard.pair_list[curr].key.get()).assume_init_ref() };
+                    let val_ref = unsafe { (*shard.pair_list[curr].val.get()).assume_init_ref() };
+
+                    if shard.pair_list[curr].next_ind.get() == head {
+                        if enq_ctr == self.slot_num {
+                            write!(print_buffer, "({key_ref:?}, {val_ref:?})").unwrap();
+                        } else {
+                            write!(print_buffer, "({key_ref:?}, {val_ref:?}), ").unwrap();
+                        }
+                        break;
+                    } else {
+                        write!(print_buffer, "({key_ref:?}, {val_ref:?}), ").unwrap();
+                        curr = shard.pair_list[curr].next_ind.get();
+                    }
+                }
+            }
+
+            // any uninit items will be marked as uninit
+            for j in enq_ctr..self.slot_num {
+                if j == self.slot_num - 1 {
+                    write!(print_buffer, "<uninit>").unwrap();
+                } else {
+                    write!(print_buffer, "<uninit>, ").unwrap();
+                }
+            }
+
+            write!(print_buffer, "]").unwrap();
+            writeln!(print_buffer).unwrap();
+        }
+        write!(print_buffer, "]").unwrap();
+        writeln!(print_buffer).unwrap();
+        print!("{print_buffer}");
+    }
 }
 
-impl<K, V> ShardedCacheMap<K, V>
+impl<K, V> RUShardedCacheMap<K, V>
 where
     K: Hash + Eq + PartialEq + Debug,
 {
@@ -239,13 +313,13 @@ where
         hasher.finish()
     }
 
-    /// Returns the number of shards that [ShardedCacheMap] has
+    /// Returns the number of shards that [RUShardedCacheMap] has
     #[inline(always)]
     pub fn get_num_of_shards(&self) -> usize {
         self.shard_num
     }
 
-    /// Returns the number of slots in each shard of [ShardedCacheMap]
+    /// Returns the number of slots in each shard of [RUShardedCacheMap]
     #[inline(always)]
     pub fn get_num_of_slots(&self) -> usize {
         self.slot_num
@@ -265,6 +339,69 @@ where
                     (*hash_shard.pair_list[*index].val.get()).assume_init_ref(),
                 )
             };
+
+            let mut spin = 0;
+            let mut sleep_time = 1;
+            loop {
+                // multiple getters updating what the head is dangerous and needs an atomic
+                // spin lock to do this correctly
+                if hash_shard.update_head.compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                    let head_ind = hash_shard.head_ind.get();
+                    let tail_ind = hash_shard.tail_ind.get();
+                    // if we're updating head, no need to change anything with
+                    // indices or update the hash shard's head/tail
+                    if *index != head_ind {
+
+                        // if we're updating tail, then all we're doing is updating
+                        // what the hash shard's current head and tail indices are
+                        // (no need to update any prev or next indices)
+
+                        // Otherwise, our current index we are doing a PutUpdate to
+                        // is a in between item in the "linked list"
+                        // That means we need to update head to our current item
+                        // Then head's prev must be connected to our current item
+                        // The prev of our current item must be connected to the next of our current item
+                        // The next of our current item must be connected to the prev of our current item
+
+                        // If the next of our current item was tail, well then now that tail index next needs
+                        // to connect to our current item
+                        if *index != tail_ind {
+                            let prev = hash_shard.pair_list[*index].prev_ind.get();
+                            let next = hash_shard.pair_list[*index].next_ind.get();
+
+                            hash_shard.pair_list[head_ind].prev_ind.set( *index);
+
+                            hash_shard.pair_list[*index].next_ind.set(head_ind);
+                            hash_shard.pair_list[*index].prev_ind.set(tail_ind);
+                            
+                            hash_shard.pair_list[prev].next_ind.set(next);
+                            hash_shard.pair_list[next].prev_ind.set(prev);
+
+                            hash_shard.head_ind.set(*index);
+
+                            if next == tail_ind {
+                                hash_shard.pair_list[next].next_ind.set(*index);
+                            }
+
+                        } else {
+                            hash_shard.head_ind.set(*index);
+                            hash_shard.tail_ind.set(hash_shard.pair_list[*index].prev_ind.get());
+                        }
+                    }
+                    hash_shard.update_head.store(false, Ordering::Relaxed);
+                    break;
+                } else {
+                    // we'll let the getter have 10 retries on updating the head
+                    // before it needs to sleep
+                    if spin == 10 {
+                        // max sleep time stops at 50 ns
+                        sleep(Duration::from_nanos(sleep_time));
+                        sleep_time = std::cmp::min(50, sleep_time << 1);
+                    } else {
+                        spin += 1;
+                    }
+                }
+            }
 
             if *k == *key {
                 return Some(v);
@@ -300,14 +437,15 @@ where
                     state + 1,
                     Ordering::Release,
                     Ordering::Acquire,
+                    // Ordering::Acquire,
+                    // Ordering::Relaxed,
                 ) {
                     Ok(_) => {
                         let val = self.get_work(key, hash_shard);
-                        hash_shard.state.fetch_sub(1, Ordering::AcqRel) - 1;
-                        // let end_state = hash_shard.state.fetch_sub(1, Ordering::AcqRel) - 1;
-                        // if end_state == PUTTER_BIT {
+                        let end_state = hash_shard.state.fetch_sub(1, Ordering::AcqRel) - 1;
+                        if end_state == PUTTER_BIT {
                             // hash_shard.priority_put_notify.notify_one();
-                        // }
+                        }
                         return val;
                     }
                     Err(act_state) => {
@@ -330,13 +468,13 @@ where
         }
     }
 
-    /// Helper function to insert, update, and/or evict the key from the [ShardedCacheMap]
+    /// Helper function to insert, update, and/or evict the key from the [RUShardedCacheMap]
     fn put_work(
         &self,
         key: K,
         val: V,
         num_slots: usize,
-        evict_policy: EvictionPolicy,
+        evict_policy: RUEvictionPolicy,
         hash_shard: &HashShard<K, V>
     ) -> PutResult<K, V>
     where
@@ -351,6 +489,49 @@ where
             // SAFETY: since V is copied in old_val and dropping it is user's responsibility
             // we can safely override the value inside this MaybeUninit
             unsafe { (*hash_shard.pair_list[*index].val.get()).write(val) };
+            
+            let head_ind = hash_shard.head_ind.get();
+            let tail_ind = hash_shard.tail_ind.get();
+            // if we're updating head, no need to change anything with
+            // indices or update the hash shard's head/tail
+            if *index != head_ind {
+
+                // if we're updating tail, then all we're doing is updating
+                // what the hash shard's current head and tail indices are
+                // (no need to update any prev or next indices)
+
+                // Otherwise, our current index we are doing a PutUpdate to
+                // is a in between item in the "linked list"
+                // That means we need to update head to our current item
+                // Then head's prev must be connected to our current item
+                // The prev of our current item must be connected to the next of our current item
+                // The next of our current item must be connected to the prev of our current item
+
+                // If the next of our current item was tail, well then now that tail index next needs
+                // to connect to our current item
+                if *index != tail_ind {
+                    let prev = hash_shard.pair_list[*index].prev_ind.get();
+                    let next = hash_shard.pair_list[*index].next_ind.get();
+
+                    hash_shard.pair_list[head_ind].prev_ind.set( *index);
+
+                    hash_shard.pair_list[*index].next_ind.set(head_ind);
+                    hash_shard.pair_list[*index].prev_ind.set(tail_ind);
+                    
+                    hash_shard.pair_list[prev].next_ind.set(next);
+                    hash_shard.pair_list[next].prev_ind.set(prev);
+
+                    hash_shard.head_ind.set(*index);
+
+                    if next == tail_ind {
+                        hash_shard.pair_list[next].next_ind.set(*index);
+                    }
+
+                } else {
+                    hash_shard.head_ind.set(*index);
+                    hash_shard.tail_ind.set(hash_shard.pair_list[*index].prev_ind.get());
+                }
+            }
 
             return PutResult::Update {
                 key: key,
@@ -362,19 +543,48 @@ where
                 let key_index = hash_shard.enq_counter.fetch_add(1, Ordering::Relaxed);
                 // SAFETY: MaybeUninit hasn't been initialized here, so it's completely
                 // okay to write to this spot (no worry about data that hasn't been dropped)
-                let key = unsafe { (*hash_shard.pair_list[num_items].key.get()).write(key) };
-                unsafe { (*hash_shard.pair_list[num_items].val.get()).write(val) };
+                let key = unsafe { (*hash_shard.pair_list[key_index].key.get()).write(key) };
+                unsafe { (*hash_shard.pair_list[key_index].val.get()).write(val) };
 
                 // SAFETY: key_ind_map is locked with state
                 unsafe { &mut *hash_shard.key_ind_map.get() }.insert(KeyRef(key), key_index);
+
+                // num_items being 0 means we are inserting our first item
+                // this item would be our head which we already have head and tail
+                // indices set to the 0th index
+
+                // if num_items is not 0, then we are inserting this current item as head
+                // and reconfiguring the previous head's prev index to our current item index
+                if num_items != 0 {
+                    let head_ind = hash_shard.head_ind.get();
+                    let tail_ind = hash_shard.tail_ind.get();
+
+                    hash_shard.pair_list[head_ind].prev_ind.set( key_index);
+
+                    // if head was a self referring index (when there was only one item in the
+                    // list ), then we want that to be set to key index for its next index
+                    if hash_shard.pair_list[head_ind].next_ind.get() == head_ind {
+                        hash_shard.pair_list[head_ind].next_ind.set(key_index);
+                    }
+
+                    // connect our current key index next to previous head item
+                    // and our prev to the current tail item
+                    hash_shard.pair_list[key_index].next_ind.set(head_ind);
+                    hash_shard.pair_list[key_index].prev_ind.set(tail_ind);
+
+                    // update head_ind to current index; tail does not need to be changed
+                    hash_shard.head_ind.set(key_index);
+                }
+
             } else {
                 let evict_ind: usize;
+
                 match evict_policy {
-                    EvictionPolicy::LIFO => {
-                        evict_ind = hash_shard.evict_index.fetch_sub(1, Ordering::Relaxed) % num_slots;
+                    RUEvictionPolicy::LRU => {
+                        evict_ind = hash_shard.tail_ind.get();
                     }
-                    EvictionPolicy::FIFO => {
-                        evict_ind = hash_shard.evict_index.fetch_add(1, Ordering::Relaxed) % num_slots;
+                    RUEvictionPolicy::MRU => {
+                        evict_ind = hash_shard.head_ind.get();
                     }
                 }
 
@@ -402,6 +612,13 @@ where
                 // MaybeUninit provides from .write() (two lines above) because the function
                 // provided key will get drop while the one inside MaybeUninit lasts
                 unsafe { &mut *hash_shard.key_ind_map.get() }.insert(KeyRef(key), evict_ind);
+
+
+                // since we're evicting at tail, we reuse this evict index as the new
+                // head and set the tail to be the prev index of this evict index
+                hash_shard.head_ind.set(evict_ind);
+                hash_shard.tail_ind.set(hash_shard.pair_list[evict_ind].prev_ind.get());
+                
                 return PutResult::Eviction {
                     key: slot.0,
                     val: slot.1,
@@ -411,7 +628,7 @@ where
         PutResult::Insert
     }
 
-    /// Inserts the associated key value pair into the [ShardedCacheMap]. If the key
+    /// Inserts the associated key value pair into the [RUShardedCacheMap]. If the key
     /// already exists in the cache, then it will update the value of the key in cache
     /// and return the old (K, V) pair (Putresult::Update). If the cache is full, then it will
     /// evict the (K, V) pair in the shard following either FIFO/LIFO and return the
@@ -445,7 +662,6 @@ where
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        let mut spin = 0;
                         let mut sleep_time = 1;
                         loop {
                             // are there no getters working right now?
@@ -458,44 +674,25 @@ where
 
                                 // notify any waiting getters to get up
                                 hash_shard.get_notify.notify_waiters();
-                                
-                                // The following may be unnecessary; I was worried about the implementation
-                                // of Tokio's notify_waiters() with incoming waiter that have not
-                                // registered itself, but according to Tokio's docs for async fn
-                                // notified it says the following:
-                                // The Notified future is guaranteed to receive wakeups from notify_waiters() 
-                                // as soon as it has been created, even if it has not yet been polled.
-
                                 // just in case an incoming getter sees that the put bit
                                 // is 1 but didn't register itself to the Notify list on time
                                 // add a permit to the Notify list
-                                
-                                // hash_shard.get_notify.notify_one(); <-- unnecessary part
-
+                                hash_shard.get_notify.notify_one();
                                 // add a permit to wake up any waiting putters just in case
-                                // (since only one put can claim the put bit, it makes sense to
+                                // (since only one can claim the put bit, it makes sense to
                                 // just use notify_one() rather than notify_waiters())
                                 hash_shard.put_notify.notify_one();
                                 return kv;
                             }
                             // getters are working rn, sleep and wait until
                             // they are done
-                            // NOTE: From benchmarking, busy spin is faster than using
-                            // sleep (presumably because the operations on using usize
-                            // keys are very fast on getter end)
-                            // I'll keep busy spinning for now
                             else {
-                                // if spin == 20 {
-                                //     // thread sleeps on failure to prevent high CPU usage
-                                //     // max sleep time is stops at 50 ns
-                                //     sleep(Duration::from_nanos(sleep_time));
-                                //     sleep_time = std::cmp::min(50, sleep_time << 1);
-                                //     new_state = hash_shard.state.load(Ordering::Acquire);
-                                //     // hash_shard.priority_put_notify.notified().await;
-                                // } else {
-                                //     spin += 1;
-                                    new_state = hash_shard.state.load(Ordering::Acquire);
-                                // }
+                                // thread sleeps on failure to prevent high CPU usage
+                                // max sleep time is stops at 50 ns
+                                sleep(Duration::from_nanos(sleep_time));
+                                new_state = hash_shard.state.load(Ordering::Acquire);
+                                sleep_time = std::cmp::min(50, sleep_time << 1);
+                                // hash_shard.priority_put_notify.notified().await;
                             }
                         }
                     }
@@ -528,12 +725,12 @@ unsafe impl<K, V> Sync for Slot<K, V> {}
 unsafe impl<K, V> Send for Slot<K, V> {}
 unsafe impl<K, V> Sync for HashShard<K, V> {}
 unsafe impl<K, V> Send for HashShard<K, V> {}
-unsafe impl<K, V> Sync for ShardedCacheMap<K, V> {}
-unsafe impl<K, V> Send for ShardedCacheMap<K, V> {}
+unsafe impl<K, V> Sync for RUShardedCacheMap<K, V> {}
+unsafe impl<K, V> Send for RUShardedCacheMap<K, V> {}
 
 // Destructor trait created for HashShard<T> to clean up
 // memory allocated and initialized onto Slot<K, V> when
-// ShardedCacheMap<K, V> goes out of scope
+// RUShardedCacheMap<K, V> goes out of scope
 impl<K, V> Drop for HashShard<K, V> {
     fn drop(&mut self) {
         let items = self.enq_counter.load(Ordering::Relaxed);
