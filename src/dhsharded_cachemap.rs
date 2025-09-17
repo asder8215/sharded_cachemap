@@ -149,7 +149,7 @@ impl<K, V, S> DHShardedCacheMap<K, V, S> {
                     if j == self.slot_num - 1 {
                         write!(print_buffer, "({key_ref:?}, {val_ref:?})").unwrap();
                     } else {
-                        write!(print_buffer, "({key_ref:?}, {val_ref:?},) ").unwrap();
+                        write!(print_buffer, "({key_ref:?}, {val_ref:?}), ").unwrap();
                     }
                 } else if j == self.slot_num - 1 {
                     write!(print_buffer, "<uninit>").unwrap();

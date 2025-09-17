@@ -1,7 +1,7 @@
 use std::hash::Hash;
 use std::borrow::Borrow;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug)]
 pub(crate) struct KeyRef<K>(pub(crate) *const K);
 impl<K> PartialEq for KeyRef<K>
 where K: PartialEq {
