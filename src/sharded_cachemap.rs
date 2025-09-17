@@ -8,8 +8,6 @@ use std::fmt::Write;
 use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::thread::sleep;
-use std::time::Duration;
 use std::{
     cell::UnsafeCell,
     hash::{DefaultHasher, Hasher},
@@ -301,7 +299,7 @@ where
                 ) {
                     Ok(_) => {
                         let val = self.get_work(key, hash_shard);
-                        hash_shard.state.fetch_sub(1, Ordering::AcqRel) - 1;
+                        hash_shard.state.fetch_sub(1, Ordering::AcqRel);1;
                         // let end_state = hash_shard.state.fetch_sub(1, Ordering::AcqRel) - 1;
                         // if end_state == PUTTER_BIT {
                         // hash_shard.priority_put_notify.notify_one();
@@ -350,7 +348,7 @@ where {
             unsafe { (*hash_shard.pair_list[*index].val.get()).write(val) };
 
             return PutResult::Update {
-                key: key,
+                key,
                 val: old_val,
             };
         } else {
@@ -443,8 +441,8 @@ where {
                     Ordering::Acquire,
                 ) {
                     Ok(_) => {
-                        let mut spin = 0;
-                        let mut sleep_time = 1;
+                        let spin = 0;
+                        let sleep_time = 1;
                         loop {
                             // are there no getters working right now?
                             // if so we can proceed with doing our work
@@ -454,7 +452,7 @@ where {
                                     val,
                                     num_of_slots,
                                     evict_policy,
-                                    &hash_shard,
+                                    hash_shard,
                                 );
 
                                 // set put bit to 0

@@ -539,7 +539,7 @@ where {
             }
 
             return PutResult::Update {
-                key: key,
+                key,
                 val: old_val,
             };
         } else {
@@ -676,7 +676,7 @@ where {
                                     val,
                                     num_of_slots,
                                     evict_policy,
-                                    &hash_shard,
+                                    hash_shard,
                                 );
 
                                 // set put bit to 0

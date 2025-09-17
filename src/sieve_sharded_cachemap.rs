@@ -341,7 +341,7 @@ where
                 // we can safely override the value inside this MaybeUninit
                 unsafe { (*hash_shard.pair_list[i].val.get()).write(val) };
 
-                if hash_shard.pair_list[i].visited_bit.load(Ordering::Relaxed) == false {
+                if !hash_shard.pair_list[i].visited_bit.load(Ordering::Relaxed) {
                     hash_shard.pair_list[i]
                         .visited_bit
                         .store(true, Ordering::Relaxed)
@@ -361,10 +361,9 @@ where
             loop {
                 evict_ind =
                     hash_shard.hand_index.fetch_add(1, Ordering::Relaxed) % self.get_num_of_slots();
-                if hash_shard.pair_list[evict_ind]
+                if !hash_shard.pair_list[evict_ind]
                     .visited_bit
                     .load(Ordering::Relaxed)
-                    == false
                 {
                     break;
                 } else {

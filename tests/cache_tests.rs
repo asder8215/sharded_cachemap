@@ -70,9 +70,9 @@ async fn basic_put_and_get() {
         // let scm_clone = scm.clone();
         async move {
             scm.put("hi", 0).await;
-            let res = scm.get(&"hi").await.cloned();
+            
             // scm.print_cache();
-            res
+            scm.get(&"hi").await.cloned()
         },
     );
 

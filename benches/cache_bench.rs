@@ -42,7 +42,7 @@ async fn bench_cache(
 
                     if get_or_put {
                         let res = scm_clone
-                            .put(data[rand_key].0.clone(), data[rand_key].1)
+                            .put(data[rand_key].0, data[rand_key].1)
                             .await;
                         match res {
                             PutResult::Update { key: _, val: _ } => {}
@@ -104,7 +104,7 @@ async fn bench_ru_cache(
 
                     if get_or_put {
                         let res = scm_clone
-                            .put(data[rand_key].0.clone(), data[rand_key].1)
+                            .put(data[rand_key].0, data[rand_key].1)
                             .await;
                         match res {
                             PutResult::Update { key: _, val: _ } => {}
