@@ -11,11 +11,7 @@ async fn multitask_multiple_puts_and_gets_1() {
     const SHARDS: usize = 20;
     const SLOTS: usize = 10;
     const NUM_TASKS: usize = 10;
-    let scm = ShardedCacheMap::new_with_slots(
-        SHARDS,
-        SLOTS,
-        EvictionPolicy::FIFO,
-    );
+    let scm = ShardedCacheMap::new_with_slots(SHARDS, SLOTS, EvictionPolicy::FIFO);
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -48,11 +44,7 @@ async fn multitask_multiple_puts_and_gets_2() {
     const SLOTS: usize = 4;
     const NUM_TASKS: usize = 10;
     const NUM_OPS: f64 = 5000000.0;
-    let scm = ShardedCacheMap::new_with_slots(
-        SHARDS,
-        SLOTS,
-        EvictionPolicy::FIFO,
-    );
+    let scm = ShardedCacheMap::new_with_slots(SHARDS, SLOTS, EvictionPolicy::FIFO);
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -103,11 +95,7 @@ async fn multitask_random_puts_and_gets_2() {
     const SLOTS: usize = 10;
     const NUM_TASKS: usize = 10;
     const NUM_OPS: f64 = 1.0;
-    let scm = ShardedCacheMap::new_with_slots(
-        SHARDS,
-        SLOTS,
-        EvictionPolicy::FIFO,
-    );
+    let scm = ShardedCacheMap::new_with_slots(SHARDS, SLOTS, EvictionPolicy::FIFO);
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)

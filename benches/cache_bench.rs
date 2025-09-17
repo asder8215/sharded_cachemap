@@ -2,10 +2,13 @@
 // cache data structure
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use rand::{Rng, rng};
-use sharded_cachemap::{DHShardedCacheMap, DoubleHashPolicy, EvictionPolicy, RUEvictionPolicy, RUShardedCacheMap, SieveShardedCacheMap};
+use sharded_cachemap::{
+    DHShardedCacheMap, DoubleHashPolicy, EvictionPolicy, RUEvictionPolicy, RUShardedCacheMap,
+    SieveShardedCacheMap,
+};
 use sharded_cachemap::{PutResult, ShardedCacheMap};
-use tinyufo::TinyUfo;
 use std::sync::Arc;
+use tinyufo::TinyUfo;
 use tokio::spawn;
 
 const KEY_GEN: usize = 10000;
@@ -19,11 +22,7 @@ async fn bench_cache(
     // data: &Vec<(String, usize)>,
     data: &Vec<(usize, usize)>,
 ) {
-    let scm = ShardedCacheMap::new_with_slots(
-        shards,
-        slots,
-        evict_policy,
-    );
+    let scm = ShardedCacheMap::new_with_slots(shards, slots, evict_policy);
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -85,11 +84,7 @@ async fn bench_ru_cache(
     // data: &Vec<(String, usize)>,
     data: &Vec<(usize, usize)>,
 ) {
-    let scm = RUShardedCacheMap::new_with_slots(
-        shards,
-        slots,
-        evict_policy,
-    );
+    let scm = RUShardedCacheMap::new_with_slots(shards, slots, evict_policy);
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -272,7 +267,7 @@ async fn bench_tinyufo_cache(
     iter_per_task: usize,
     data: &Vec<(String, usize)>,
 ) {
-    let scm = Arc::new(TinyUfo::new(5*10*10, shards * slots));
+    let scm = Arc::new(TinyUfo::new(5 * 10 * 10, shards * slots));
     let mut cache_vecs = Vec::new();
     // Since tasks handle their await points in sequence (context switching happens *between*
     // tasks at await points, not within the same task)
@@ -290,8 +285,7 @@ async fn bench_tinyufo_cache(
                     let get_or_put = rng().random_bool(0.50);
 
                     if get_or_put {
-                        let res = scm_clone
-                            .put(data[rand_key].0.clone(), data[rand_key].1, 1);
+                        let res = scm_clone.put(data[rand_key].0.clone(), data[rand_key].1, 1);
                         // match res {
                         //     PutResult::Update { key: _, val: _ } => {}
                         //     _ => {
@@ -321,7 +315,6 @@ async fn bench_tinyufo_cache(
         total_misses / (task_count as f64 * iter_per_task as f64)
     );
 }
-
 
 fn benchmark_scm(c: &mut Criterion) {
     const SHARDS: usize = 256;

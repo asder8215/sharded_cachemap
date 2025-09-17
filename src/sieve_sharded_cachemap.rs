@@ -1,4 +1,5 @@
 use crate::PutResult;
+use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -12,7 +13,6 @@ use std::{
     mem::MaybeUninit,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use crossbeam_utils::CachePadded;
 use tokio::sync::Notify;
 // use crate::put_guard::PutGuard;
 
@@ -103,7 +103,7 @@ struct Slot<K, V> {
     /// the val at this slot
     val: UnsafeCell<MaybeUninit<V>>,
     /// visited bit
-    visited_bit: AtomicBool
+    visited_bit: AtomicBool,
 }
 
 impl<K, V> Slot<K, V> {
@@ -111,7 +111,7 @@ impl<K, V> Slot<K, V> {
         Self {
             key: UnsafeCell::new(MaybeUninit::uninit()),
             val: UnsafeCell::new(MaybeUninit::uninit()),
-            visited_bit: AtomicBool::new(false)
+            visited_bit: AtomicBool::new(false),
         }
     }
 }
@@ -244,7 +244,9 @@ where
             };
             if k.borrow() == key {
                 if !hash_shard.pair_list[i].visited_bit.load(Ordering::Relaxed) {
-                    hash_shard.pair_list[i].visited_bit.store(true, Ordering::Relaxed)
+                    hash_shard.pair_list[i]
+                        .visited_bit
+                        .store(true, Ordering::Relaxed)
                 }
                 return Some(v);
             }
@@ -315,13 +317,7 @@ where
         }
     }
 
-    fn put_work(
-        &self,
-        key: K,
-        val: V,
-        num_slots: usize,
-        hash_shard_ind: usize,
-    ) -> PutResult<K, V>
+    fn put_work(&self, key: K, val: V, num_slots: usize, hash_shard_ind: usize) -> PutResult<K, V>
     where
         K: Debug,
     {
@@ -346,12 +342,11 @@ where
                 unsafe { (*hash_shard.pair_list[i].val.get()).write(val) };
 
                 if hash_shard.pair_list[i].visited_bit.load(Ordering::Relaxed) == false {
-                    hash_shard.pair_list[i].visited_bit.store(true,Ordering::Relaxed)
+                    hash_shard.pair_list[i]
+                        .visited_bit
+                        .store(true, Ordering::Relaxed)
                 }
-                return PutResult::Update {
-                    key,
-                    val: old_val,
-                };
+                return PutResult::Update { key, val: old_val };
             }
         }
 
@@ -364,11 +359,18 @@ where
         } else {
             let mut evict_ind: usize;
             loop {
-                evict_ind = hash_shard.hand_index.fetch_add(1, Ordering::Relaxed) % self.get_num_of_slots();
-                if hash_shard.pair_list[evict_ind].visited_bit.load(Ordering::Relaxed) == false {
+                evict_ind =
+                    hash_shard.hand_index.fetch_add(1, Ordering::Relaxed) % self.get_num_of_slots();
+                if hash_shard.pair_list[evict_ind]
+                    .visited_bit
+                    .load(Ordering::Relaxed)
+                    == false
+                {
                     break;
                 } else {
-                    hash_shard.pair_list[evict_ind].visited_bit.store(false, Ordering::Relaxed);
+                    hash_shard.pair_list[evict_ind]
+                        .visited_bit
+                        .store(false, Ordering::Relaxed);
                 }
             }
 
@@ -425,12 +427,7 @@ where
                             // are there no getters working right now?
                             // if so we can proceed with doing our work
                             if new_state & GETTER_MASK == 0 {
-                                let kv = self.put_work(
-                                    key,
-                                    val,
-                                    num_of_slots,
-                                    hash_shard_ind,
-                                );
+                                let kv = self.put_work(key, val, num_of_slots, hash_shard_ind);
 
                                 // set put bit to 0
                                 hash_shard.state.fetch_and(GETTER_MASK, Ordering::Release);

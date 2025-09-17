@@ -1,12 +1,15 @@
 use crate::PutResult;
 use crate::key_ref::KeyRef;
+use ahash::HashMap;
+use ahash::HashMapExt;
+use crossbeam_utils::CachePadded;
 use std::cell::Cell;
 use std::fmt::Debug;
 use std::fmt::Write;
 use std::hash::Hash;
 use std::pin::Pin;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::thread::sleep;
 use std::time::Duration;
 use std::{
@@ -15,16 +18,13 @@ use std::{
     mem::MaybeUninit,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use ahash::HashMap;
-use ahash::HashMapExt;
-use crossbeam_utils::CachePadded;
 use tokio::sync::Notify;
 
 // TODO: Need to do the following
 //  - add comments/docs to all of the functions
 //  - clean up any code (remove any redundant code if any)
 //  - add more unit tests and benchmarking examples
-//  - maybe add clone and remove method to RUShardedCacheMap 
+//  - maybe add clone and remove method to RUShardedCacheMap
 
 // bit 63 checked for whether putter bit is set
 const PUTTER_BIT: usize = 1 << 63;
@@ -81,8 +81,7 @@ pub struct RUShardedCacheMap<K, V> {
 }
 
 #[derive(Debug)]
-struct HashShard<K, V> 
-{
+struct HashShard<K, V> {
     /// bound queue of key-val pairs of size m
     pair_list: Pin<Box<[Slot<K, V>]>>,
     /// a hashmap containing all the key-val pairs in this
@@ -104,7 +103,7 @@ struct HashShard<K, V>
     head_ind: Cell<usize>,
     /// the tail item of the queue (least recently used)
     tail_ind: Cell<usize>,
-    /// getters need a lock to updating the 
+    /// getters need a lock to updating the
     /// head of the list to ensure that
     /// the current head index is updated
     /// appropriately
@@ -171,7 +170,6 @@ impl<K, V> HashShard<K, V> {
     }
 }
 
-
 impl<K, V> RUShardedCacheMap<K, V> {
     /// Instatiates the [RUShardedCacheMap] object with non-zero user requested number of shards,
     /// 8 slots, and an eviction policy to follow (FIFO, LIFO)
@@ -181,7 +179,11 @@ impl<K, V> RUShardedCacheMap<K, V> {
 
     /// Instatiates the [RUShardedCacheMap] object with non-zero user requested number of shards
     /// and slots, and an eviction policy to follow (FIFO, LIFO)
-    pub fn new_with_slots(shards: usize, slots: usize, evict_policy: RUEvictionPolicy) -> Arc<Self> {
+    pub fn new_with_slots(
+        shards: usize,
+        slots: usize,
+        evict_policy: RUEvictionPolicy,
+    ) -> Arc<Self> {
         Arc::new(Self {
             shards: {
                 let mut vec = Vec::with_capacity(shards);
@@ -198,9 +200,9 @@ impl<K, V> RUShardedCacheMap<K, V> {
 
     /// Prints the content of [RUShardedCacheMap] as it appears in the
     /// shard
-    /// 
+    ///
     /// Time Complexity: O(shards * slots)
-    /// 
+    ///
     /// Space Complexity: O(1)
     pub fn print_cache(&self)
     where
@@ -238,11 +240,11 @@ impl<K, V> RUShardedCacheMap<K, V> {
     }
 
     /// Prints the content of [RUShardedCacheMap] based on
-    /// recent usage in the shard (from most recently used to 
+    /// recent usage in the shard (from most recently used to
     /// least recently used)
-    /// 
+    ///
     /// Time Complexity: O(shards * slots)
-    /// 
+    ///
     /// Space Complexity: O(1)
     pub fn print_ru_cache(&self)
     where
@@ -345,13 +347,16 @@ where
             loop {
                 // multiple getters updating what the head is dangerous and needs an atomic
                 // spin lock to do this correctly
-                if hash_shard.update_head.compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                if hash_shard
+                    .update_head
+                    .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                    .is_ok()
+                {
                     let head_ind = hash_shard.head_ind.get();
                     let tail_ind = hash_shard.tail_ind.get();
                     // if we're updating head, no need to change anything with
                     // indices or update the hash shard's head/tail
                     if *index != head_ind {
-
                         // if we're updating tail, then all we're doing is updating
                         // what the hash shard's current head and tail indices are
                         // (no need to update any prev or next indices)
@@ -369,11 +374,11 @@ where
                             let prev = hash_shard.pair_list[*index].prev_ind.get();
                             let next = hash_shard.pair_list[*index].next_ind.get();
 
-                            hash_shard.pair_list[head_ind].prev_ind.set( *index);
+                            hash_shard.pair_list[head_ind].prev_ind.set(*index);
 
                             hash_shard.pair_list[*index].next_ind.set(head_ind);
                             hash_shard.pair_list[*index].prev_ind.set(tail_ind);
-                            
+
                             hash_shard.pair_list[prev].next_ind.set(next);
                             hash_shard.pair_list[next].prev_ind.set(prev);
 
@@ -382,10 +387,11 @@ where
                             if next == tail_ind {
                                 hash_shard.pair_list[next].next_ind.set(*index);
                             }
-
                         } else {
                             hash_shard.head_ind.set(*index);
-                            hash_shard.tail_ind.set(hash_shard.pair_list[*index].prev_ind.get());
+                            hash_shard
+                                .tail_ind
+                                .set(hash_shard.pair_list[*index].prev_ind.get());
                         }
                     }
                     hash_shard.update_head.store(false, Ordering::Relaxed);
@@ -405,7 +411,7 @@ where
 
             if *k == *key {
                 return Some(v);
-            }    
+            }
         }
         None
     }
@@ -413,12 +419,12 @@ where
     /// Retrieves the associated value of the key from the cache if it exists.
     /// If the key does not exist in the cache, then this method will return
     /// None.
-    /// 
+    ///
     /// Time Complexity: O(1) (Amortized because it depends on how long the custom
-    /// asynchronous RWlock is held by a previous put operation + consideration of 
+    /// asynchronous RWlock is held by a previous put operation + consideration of
     /// HashMap chain bucket; this should be really fast though!)
-    /// 
-    /// Space Complexity: O(1) 
+    ///
+    /// Space Complexity: O(1)
     pub async fn get(&self, key: &K) -> Option<&V> {
         let hash_shard_ind = (self.hash_key(key) % self.get_num_of_shards() as u64) as usize;
         let hash_shard = &self.shards[hash_shard_ind];
@@ -475,27 +481,25 @@ where
         val: V,
         num_slots: usize,
         evict_policy: RUEvictionPolicy,
-        hash_shard: &HashShard<K, V>
+        hash_shard: &HashShard<K, V>,
     ) -> PutResult<K, V>
-    where
-    {
+where {
         if let Some(index) = hash_shard.borrow_key_ind_map().get(&key) {
             // SAFETY: num_items safely tells us how many key-val pairs were initialized
             // and because the value will be replaced here, the user can
             // receive an owned version of V (the dropping of V will occur on
             // user's end), so it's okay to get a duplicate copy here
             let old_val = unsafe { (*hash_shard.pair_list[*index].val.get()).assume_init_read() };
-            
+
             // SAFETY: since V is copied in old_val and dropping it is user's responsibility
             // we can safely override the value inside this MaybeUninit
             unsafe { (*hash_shard.pair_list[*index].val.get()).write(val) };
-            
+
             let head_ind = hash_shard.head_ind.get();
             let tail_ind = hash_shard.tail_ind.get();
             // if we're updating head, no need to change anything with
             // indices or update the hash shard's head/tail
             if *index != head_ind {
-
                 // if we're updating tail, then all we're doing is updating
                 // what the hash shard's current head and tail indices are
                 // (no need to update any prev or next indices)
@@ -513,11 +517,11 @@ where
                     let prev = hash_shard.pair_list[*index].prev_ind.get();
                     let next = hash_shard.pair_list[*index].next_ind.get();
 
-                    hash_shard.pair_list[head_ind].prev_ind.set( *index);
+                    hash_shard.pair_list[head_ind].prev_ind.set(*index);
 
                     hash_shard.pair_list[*index].next_ind.set(head_ind);
                     hash_shard.pair_list[*index].prev_ind.set(tail_ind);
-                    
+
                     hash_shard.pair_list[prev].next_ind.set(next);
                     hash_shard.pair_list[next].prev_ind.set(prev);
 
@@ -526,10 +530,11 @@ where
                     if next == tail_ind {
                         hash_shard.pair_list[next].next_ind.set(*index);
                     }
-
                 } else {
                     hash_shard.head_ind.set(*index);
-                    hash_shard.tail_ind.set(hash_shard.pair_list[*index].prev_ind.get());
+                    hash_shard
+                        .tail_ind
+                        .set(hash_shard.pair_list[*index].prev_ind.get());
                 }
             }
 
@@ -559,7 +564,7 @@ where
                     let head_ind = hash_shard.head_ind.get();
                     let tail_ind = hash_shard.tail_ind.get();
 
-                    hash_shard.pair_list[head_ind].prev_ind.set( key_index);
+                    hash_shard.pair_list[head_ind].prev_ind.set(key_index);
 
                     // if head was a self referring index (when there was only one item in the
                     // list ), then we want that to be set to key index for its next index
@@ -575,7 +580,6 @@ where
                     // update head_ind to current index; tail does not need to be changed
                     hash_shard.head_ind.set(key_index);
                 }
-
             } else {
                 let evict_ind: usize;
 
@@ -602,7 +606,7 @@ where
                 // remove this item safely
                 unsafe { &mut *hash_shard.key_ind_map.get() }.remove(&slot.0);
 
-                // SAFETY: We have an owned copy of the key val pairs to give to the user, 
+                // SAFETY: We have an owned copy of the key val pairs to give to the user,
                 // so we can overwrite this safely with the new key val pairs
                 let key = unsafe { (*hash_shard.pair_list[evict_ind].key.get()).write(key) };
                 unsafe { (*hash_shard.pair_list[evict_ind].val.get()).write(val) };
@@ -613,12 +617,13 @@ where
                 // provided key will get drop while the one inside MaybeUninit lasts
                 unsafe { &mut *hash_shard.key_ind_map.get() }.insert(KeyRef(key), evict_ind);
 
-
                 // since we're evicting at tail, we reuse this evict index as the new
                 // head and set the tail to be the prev index of this evict index
                 hash_shard.head_ind.set(evict_ind);
-                hash_shard.tail_ind.set(hash_shard.pair_list[evict_ind].prev_ind.get());
-                
+                hash_shard
+                    .tail_ind
+                    .set(hash_shard.pair_list[evict_ind].prev_ind.get());
+
                 return PutResult::Eviction {
                     key: slot.0,
                     val: slot.1,
@@ -634,15 +639,14 @@ where
     /// evict the (K, V) pair in the shard following either FIFO/LIFO and return the
     /// evicted (K, V) pair (Putresult::Eviction). Otherwise, it will perform a regular
     /// insertion in the shard (Putresult::Insert).
-    /// 
+    ///
     /// Time Complexity: O(1) (Amortized because it depends on how long the custom
-    /// asynchronous RWlock is held by get operation(s) + consideration of 
+    /// asynchronous RWlock is held by get operation(s) + consideration of
     /// HashMap chain bucket; this should be really fast though!)
-    /// 
-    /// Space Complexity: O(1) 
+    ///
+    /// Space Complexity: O(1)
     pub async fn put(&self, key: K, val: V) -> PutResult<K, V>
-    where
-    {
+where {
         let hash_shard_ind = (self.hash_key(&key) % self.get_num_of_shards() as u64) as usize;
         let num_of_slots = self.get_num_of_slots();
         let evict_policy = self.evict_policy;
@@ -667,7 +671,13 @@ where
                             // are there no getters working right now?
                             // if so we can proceed with doing our work
                             if new_state & GETTER_MASK == 0 {
-                                let kv = self.put_work(key, val, num_of_slots, evict_policy, &hash_shard);
+                                let kv = self.put_work(
+                                    key,
+                                    val,
+                                    num_of_slots,
+                                    evict_policy,
+                                    &hash_shard,
+                                );
 
                                 // set put bit to 0
                                 hash_shard.state.fetch_and(GETTER_MASK, Ordering::Release);

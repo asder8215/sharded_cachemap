@@ -1,5 +1,8 @@
 use crate::PutResult;
 use crate::key_ref::KeyRef;
+use ahash::HashMap;
+use ahash::HashMapExt;
+use crossbeam_utils::CachePadded;
 use std::fmt::Debug;
 use std::fmt::Write;
 use std::hash::Hash;
@@ -13,16 +16,13 @@ use std::{
     mem::MaybeUninit,
     sync::atomic::{AtomicUsize, Ordering},
 };
-use ahash::HashMap;
-use ahash::HashMapExt;
-use crossbeam_utils::CachePadded;
 use tokio::sync::Notify;
 
 // TODO: Need to do the following
 //  - add comments/docs to all of the functions
 //  - clean up any code (remove any redundant code if any)
 //  - add more unit tests and benchmarking examples
-//  - maybe add clone and remove method to ShardedCacheMap 
+//  - maybe add clone and remove method to ShardedCacheMap
 
 // bit 63 checked for whether putter bit is set
 const PUTTER_BIT: usize = 1 << 63;
@@ -79,8 +79,7 @@ pub struct ShardedCacheMap<K, V> {
 }
 
 #[derive(Debug)]
-struct HashShard<K, V> 
-{
+struct HashShard<K, V> {
     /// bound queue of key-val pairs of size m
     pair_list: Pin<Box<[Slot<K, V>]>>,
     /// a hashmap containing all the key-val pairs in this
@@ -156,7 +155,6 @@ impl<K, V> HashShard<K, V> {
     }
 }
 
-
 impl<K, V> ShardedCacheMap<K, V> {
     /// Instatiates the [ShardedCacheMap] object with non-zero user requested number of shards,
     /// 8 slots, and an eviction policy to follow (FIFO, LIFO)
@@ -183,9 +181,9 @@ impl<K, V> ShardedCacheMap<K, V> {
 
     /// Prints the content of [ShardedCacheMap] as it appears in the
     /// shard
-    /// 
+    ///
     /// Time Complexity: O(shards * slots)
-    /// 
+    ///
     /// Space Complexity: O(1)
     pub fn print_cache(&self)
     where
@@ -268,7 +266,7 @@ where
 
             if *k == *key {
                 return Some(v);
-            }    
+            }
         }
         None
     }
@@ -276,12 +274,12 @@ where
     /// Retrieves the associated value of the key from the cache if it exists.
     /// If the key does not exist in the cache, then this method will return
     /// None.
-    /// 
+    ///
     /// Time Complexity: O(1) (Amortized because it depends on how long the custom
-    /// asynchronous RWlock is held by a previous put operation + consideration of 
+    /// asynchronous RWlock is held by a previous put operation + consideration of
     /// HashMap chain bucket; this should be really fast though!)
-    /// 
-    /// Space Complexity: O(1) 
+    ///
+    /// Space Complexity: O(1)
     pub async fn get(&self, key: &K) -> Option<&V> {
         let hash_shard_ind = (self.hash_key(key) % self.get_num_of_shards() as u64) as usize;
         let hash_shard = &self.shards[hash_shard_ind];
@@ -306,7 +304,7 @@ where
                         hash_shard.state.fetch_sub(1, Ordering::AcqRel) - 1;
                         // let end_state = hash_shard.state.fetch_sub(1, Ordering::AcqRel) - 1;
                         // if end_state == PUTTER_BIT {
-                            // hash_shard.priority_put_notify.notify_one();
+                        // hash_shard.priority_put_notify.notify_one();
                         // }
                         return val;
                     }
@@ -337,17 +335,16 @@ where
         val: V,
         num_slots: usize,
         evict_policy: EvictionPolicy,
-        hash_shard: &HashShard<K, V>
+        hash_shard: &HashShard<K, V>,
     ) -> PutResult<K, V>
-    where
-    {
+where {
         if let Some(index) = hash_shard.borrow_key_ind_map().get(&key) {
             // SAFETY: num_items safely tells us how many key-val pairs were initialized
             // and because the value will be replaced here, the user can
             // receive an owned version of V (the dropping of V will occur on
             // user's end), so it's okay to get a duplicate copy here
             let old_val = unsafe { (*hash_shard.pair_list[*index].val.get()).assume_init_read() };
-            
+
             // SAFETY: since V is copied in old_val and dropping it is user's responsibility
             // we can safely override the value inside this MaybeUninit
             unsafe { (*hash_shard.pair_list[*index].val.get()).write(val) };
@@ -371,10 +368,12 @@ where
                 let evict_ind: usize;
                 match evict_policy {
                     EvictionPolicy::LIFO => {
-                        evict_ind = hash_shard.evict_index.fetch_sub(1, Ordering::Relaxed) % num_slots;
+                        evict_ind =
+                            hash_shard.evict_index.fetch_sub(1, Ordering::Relaxed) % num_slots;
                     }
                     EvictionPolicy::FIFO => {
-                        evict_ind = hash_shard.evict_index.fetch_add(1, Ordering::Relaxed) % num_slots;
+                        evict_ind =
+                            hash_shard.evict_index.fetch_add(1, Ordering::Relaxed) % num_slots;
                     }
                 }
 
@@ -392,7 +391,7 @@ where
                 // remove this item safely
                 unsafe { &mut *hash_shard.key_ind_map.get() }.remove(&slot.0);
 
-                // SAFETY: We have an owned copy of the key val pairs to give to the user, 
+                // SAFETY: We have an owned copy of the key val pairs to give to the user,
                 // so we can overwrite this safely with the new key val pairs
                 let key = unsafe { (*hash_shard.pair_list[evict_ind].key.get()).write(key) };
                 unsafe { (*hash_shard.pair_list[evict_ind].val.get()).write(val) };
@@ -417,15 +416,14 @@ where
     /// evict the (K, V) pair in the shard following either FIFO/LIFO and return the
     /// evicted (K, V) pair (Putresult::Eviction). Otherwise, it will perform a regular
     /// insertion in the shard (Putresult::Insert).
-    /// 
+    ///
     /// Time Complexity: O(1) (Amortized because it depends on how long the custom
-    /// asynchronous RWlock is held by get operation(s) + consideration of 
+    /// asynchronous RWlock is held by get operation(s) + consideration of
     /// HashMap chain bucket; this should be really fast though!)
-    /// 
-    /// Space Complexity: O(1) 
+    ///
+    /// Space Complexity: O(1)
     pub async fn put(&self, key: K, val: V) -> PutResult<K, V>
-    where
-    {
+where {
         let hash_shard_ind = (self.hash_key(&key) % self.get_num_of_shards() as u64) as usize;
         let num_of_slots = self.get_num_of_slots();
         let evict_policy = self.evict_policy;
@@ -451,25 +449,31 @@ where
                             // are there no getters working right now?
                             // if so we can proceed with doing our work
                             if new_state & GETTER_MASK == 0 {
-                                let kv = self.put_work(key, val, num_of_slots, evict_policy, &hash_shard);
+                                let kv = self.put_work(
+                                    key,
+                                    val,
+                                    num_of_slots,
+                                    evict_policy,
+                                    &hash_shard,
+                                );
 
                                 // set put bit to 0
                                 hash_shard.state.fetch_and(GETTER_MASK, Ordering::Release);
 
                                 // notify any waiting getters to get up
                                 hash_shard.get_notify.notify_waiters();
-                                
+
                                 // The following may be unnecessary; I was worried about the implementation
                                 // of Tokio's notify_waiters() with incoming waiter that have not
                                 // registered itself, but according to Tokio's docs for async fn
                                 // notified it says the following:
-                                // The Notified future is guaranteed to receive wakeups from notify_waiters() 
+                                // The Notified future is guaranteed to receive wakeups from notify_waiters()
                                 // as soon as it has been created, even if it has not yet been polled.
 
                                 // just in case an incoming getter sees that the put bit
                                 // is 1 but didn't register itself to the Notify list on time
                                 // add a permit to the Notify list
-                                
+
                                 // hash_shard.get_notify.notify_one(); <-- unnecessary part
 
                                 // add a permit to wake up any waiting putters just in case
@@ -494,7 +498,7 @@ where
                                 //     // hash_shard.priority_put_notify.notified().await;
                                 // } else {
                                 //     spin += 1;
-                                    new_state = hash_shard.state.load(Ordering::Acquire);
+                                new_state = hash_shard.state.load(Ordering::Acquire);
                                 // }
                             }
                         }

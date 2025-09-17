@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 //  - clean up any code (remove any redundant code if any)
 //  - add more unit tests and benchmarking examples
 //  - add code for users to provide a hasher function to use
-//  - maybe add clone and remove method to DHShardedCacheMap 
+//  - maybe add clone and remove method to DHShardedCacheMap
 
 /// DHShardedCacheMap uses Double Hashing, one for choosing a shard,
 /// one for choosing a slot in the shard's bounded queue
@@ -292,10 +292,7 @@ where
                 let old_val =
                     unsafe { (*hash_shard.pair_list[slot_ind].val.get()).assume_init_read() };
                 unsafe { (*hash_shard.pair_list[slot_ind].val.get()).write(val) };
-                PutResult::Update {
-                    key,
-                    val: old_val,
-                }
+                PutResult::Update { key, val: old_val }
             } else {
                 // SAFETY: On eviction, it must be the case that the key-val pair must be overrided with whatever
                 // key-val pair was provided by the user. The previous key-val pair stored will be returned and owned
